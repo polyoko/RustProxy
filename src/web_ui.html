@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RustProxy Dashboard</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --background: 222.2 84% 4.9%;
+            --foreground: 210 40% 98%;
+            --card: 222.2 84% 4.9%;
+            --card-foreground: 210 40% 98%;
+            --popover: 222.2 84% 4.9%;
+            --popover-foreground: 210 40% 98%;
+            --primary: 210 40% 98%;
+            --primary-foreground: 222.2 47.4% 11.2%;
+            --secondary: 217.2 32.6% 17.5%;
+            --secondary-foreground: 210 40% 98%;
+            --muted: 217.2 32.6% 17.5%;
+            --muted-foreground: 215 20.2% 65.1%;
+            --accent: 217.2 32.6% 17.5%;
+            --accent-foreground: 210 40% 98%;
+            --destructive: 0 62.8% 30.6%;
+            --destructive-foreground: 210 40% 98%;
+            --border: 217.2 32.6% 17.5%;
+            --input: 217.2 32.6% 17.5%;
+            --ring: 212.7 26.8% 83.9%;
+            --radius: 0.5rem;
+        }
+
+        * {
+            box-sizing: border-box;
+            border-color: hsl(var(--border));
+        }
+
+        body {
+            margin: 0;
+            font-family: 'Inter', sans-serif;
+            background-color: hsl(var(--background));
+            color: hsl(var(--foreground));
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .login-overlay {
+            position: fixed;
+            inset: 0;
+            background-color: hsl(var(--background) / 0.8);
+            backdrop-filter: blur(4px);
+            z-index: 100;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .main-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2.5rem 2rem;
+            width: 100%;
+        }
+
+        h1,
+        h2,
+        h3 {
+            margin: 0;
+            font-weight: 600;
+            letter-spacing: -0.025em;
+        }
+
+        h1 {
+            font-size: 1.875rem;
+            color: hsl(var(--foreground));
+            margin-bottom: 2rem;
+        }
+
+        h2 {
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+        }
+
+        p.text-muted {
+            color: hsl(var(--muted-foreground));
+            font-size: 0.875rem;
+            margin-top: 0;
+            margin-bottom: 1.5rem;
+        }
+
+        .card {
+            background-color: hsl(var(--card));
+            border: 1px solid hsl(var(--border));
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+        }
+
+        .grid-layout {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .grid-full {
+            grid-column: 1 / -1;
+        }
+
+        input,
+        select {
+            display: flex;
+            width: 100%;
+            border-radius: calc(var(--radius) - 2px);
+            border: 1px solid hsl(var(--input));
+            background-color: hsl(var(--background));
+            padding: 0.5rem 0.75rem;
+            font-size: 0.875rem;
+            color: hsl(var(--foreground));
+            transition: outline 0.15s;
+        }
+
+        input:focus,
+        select:focus {
+            outline: 2px solid hsl(var(--ring));
+            outline-offset: 2px;
+            border-color: transparent;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: calc(var(--radius) - 2px);
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: background-color 0.15s, color 0.15s;
+            cursor: pointer;
+            border: none;
+            padding: 0.5rem 1rem;
+            height: 2.25rem;
+        }
+
+        .btn-primary {
+            background-color: hsl(var(--primary));
+            color: hsl(var(--primary-foreground));
+        }
+
+        .btn-primary:hover {
+            background-color: hsl(var(--primary) / 0.9);
+        }
+
+        .btn-secondary {
+            background-color: hsl(var(--secondary));
+            color: hsl(var(--secondary-foreground));
+        }
+
+        .btn-secondary:hover {
+            background-color: hsl(var(--secondary) / 0.8);
+        }
+
+        .btn-destructive {
+            background-color: hsl(var(--destructive));
+            color: hsl(var(--destructive-foreground));
+        }
+
+        .btn-destructive:hover {
+            background-color: hsl(var(--destructive) / 0.9);
+        }
+
+        .btn-outline {
+            border: 1px solid hsl(var(--input));
+            background-color: transparent;
+            color: hsl(var(--foreground));
+        }
+
+
+        .btn-outline:hover {
+            background-color: hsl(var(--accent));
+            color: hsl(var(--accent-foreground));
+        }
+
+        .btn-sm {
+            height: 2rem;
+            padding: 0 0.75rem;
+            font-size: 0.75rem;
+        }
+
+        .btn-icon {
+            padding: 0.5rem;
+            height: 2.25rem;
+            width: 2.25rem;
+        }
+
+        .flex-between {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .flex-gap {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .table-wrap {
+            overflow-x: auto;
+            margin-top: 1rem;
+            border: 1px solid hsl(var(--border));
+            border-radius: var(--radius);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.875rem;
+        }
+
+        th {
+            color: hsl(var(--muted-foreground));
+            font-weight: 500;
+            border-bottom: 1px solid hsl(var(--border));
+            padding: 0.75rem 1rem;
+        }
+
+        td {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid hsl(var(--border));
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tbody tr:hover {
+            background-color: hsl(var(--muted) / 0.5);
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 9999px;
+            border: 1px solid transparent;
+            padding: 0.125rem 0.625rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            background-color: hsl(var(--secondary));
+            color: hsl(var(--secondary-foreground));
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 1.5rem;
+            right: 1.5rem;
+            background-color: hsl(var(--background));
+            border: 1px solid hsl(var(--border));
+            color: hsl(var(--foreground));
+            padding: 1rem 1.5rem;
+            border-radius: var(--radius);
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+            animation: slideIn 0.2s ease-out;
+            z-index: 1000;
+            font-size: 0.875rem;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateY(100%);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
+        }
+
+        /* Bind Dialog Form styling */
+        .form-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr 1fr auto;
+            gap: 0.75rem;
+            margin-top: 1.5rem;
+            align-items: start;
+        }
+
+        @media (max-width: 900px) {
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="app">
+        <!-- Login Overlay -->
+        <div class="login-overlay" v-if="!isAuthenticated">
+            <div class="card" style="width: 100%; max-width: 380px;">
+                <h2 style="text-align: center;">Sign In</h2>
+                <p class="text-muted" style="text-align: center;">Enter your server password to continue.</p>
+                <form @submit.prevent="login" style="display: flex; flex-direction: column; gap: 1rem;">
+                    <input type="password" v-model="passwordInput" placeholder="Password" autofocus required>
+                    <button type="submit" class="btn btn-primary">Authenticate</button>
+                </form>
+            </div>
+        </div>
+
+        <!-- Main Dashboard -->
+        <div class="main-container" v-else>
+            <div class="flex-between" style="margin-bottom: 2rem;">
+                <h1>Dashboard</h1>
+                <a :href="`/qr?pwd=${passwordHeader}`" target="_blank" style="text-decoration:none;">
+                    <button class="btn btn-outline flex-gap">
+                        <svg width="15" height="15" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path
+                                d="M4 4H6V6H4V4ZM3 3V7H7V3H3ZM9 4H11V6H9V4ZM8 3V7H12V3H8ZM4 9H6V11H4V9ZM3 8V12H7V8H3ZM10.5 8H9V9.5H10.5V8ZM10.5 9.5H12V11H10.5V9.5ZM9 11H10.5V12.5H9V11ZM12 8H10.5V9.5H12V8ZM12 9.5H13.5V11H12V9.5ZM10.5 11H12V12.5H10.5V11ZM1 1V14H14V1H1ZM0 0H15V15H0V0Z"
+                                fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"></path>
+                        </svg>
+                        Mobile QR
+                    </button>
+                </a>
+            </div>
+
+            <div class="grid-layout">
+
+                <!-- Agent List -->
+                <div class="card grid-full">
+                    <div class="flex-between">
+                        <div>
+                            <h2>Connected Agents</h2>
+                            <p class="text-muted">Manage your active device connections.</p>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Agent ID</th>
+                                    <th>IP Address</th>
+                                    <th>OS</th>
+                                    <th>Bandwidth</th>
+                                    <th style="text-align: right;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="agent in agents" :key="agent.id">
+                                    <td style="font-weight: 500;">{{ agent.id }}</td>
+                                    <td style="color: hsl(var(--muted-foreground));">{{ agent.addr.split(':')[0] }}</td>
+                                    <td><span class="badge">{{ agent.os }}</span></td>
+                                    <td>{{ agent.usage_mb }} MB</td>
+                                    <td style="text-align: right;">
+                                        <button v-if="agent.os === 'Android'" @click="copyResetLink(agent.id)"
+                                            class="btn btn-secondary btn-sm" title="Copy Reset Link">Copy Link</button>
+                                    </td>
+                                </tr>
+                                <tr v-if="agents.length === 0">
+                                    <td colspan="5"
+                                        style="text-align: center; color: hsl(var(--muted-foreground)); padding: 2rem;">
+                                        No agents currently connected.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Proxy Binds -->
+                <div class="card grid-full">
+                    <div class="flex-between">
+                        <div>
+                            <h2>SOCKS5 Proxies</h2>
+                            <p class="text-muted">Manage active proxy listener ports.</p>
+                        </div>
+                        <div class="flex-gap">
+                            <button class="btn btn-outline" @click="showPasswords = !showPasswords">
+                                {{ showPasswords ? 'Hide Passwords' : 'Show Passwords' }}
+                            </button>
+                            <button class="btn btn-outline" @click="copyAllProxies">Copy All</button>
+                            <button class="btn btn-primary" @click="openBindDialog = !openBindDialog">
+                                {{ openBindDialog ? 'Cancel' : 'Create Proxy' }}
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-if="openBindDialog"
+                        style="margin-top: 1rem; padding: 1.5rem; background-color: hsl(var(--muted) / 0.5); border-radius: var(--radius); border: 1px solid hsl(var(--border));">
+                        <h3 style="font-size: 0.875rem; margin-bottom: 0.5rem;">New Proxy Target</h3>
+                        <div class="form-grid">
+                            <select v-model="newBind.agent_id" required>
+                                <option value="">Select Target Agent</option>
+                                <option v-for="a in agents" :value="a.id">{{ a.id }}</option>
+                            </select>
+                            <input type="number" v-model="newBind.port" placeholder="Port (e.g. 1080)" required>
+                            <input type="text" v-model="newBind.user" placeholder="Auth Username">
+                            <input type="password" v-model="newBind.pass" placeholder="Auth Password">
+                            <div class="flex-gap">
+                                <button class="btn btn-secondary" @click="randomizeBind"
+                                    title="Randomize Credentials">🎲</button>
+                                <button class="btn btn-primary" @click="submitBind">Start</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Port</th>
+                                    <th>Target</th>
+                                    <th>Credentials</th>
+                                    <th>Bandwidth</th>
+                                    <th style="text-align: right;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr v-for="bind in binds" :key="bind.port">
+                                    <td style="font-weight: 600;">{{ bind.port }}</td>
+                                    <td style="color: hsl(var(--muted-foreground));">{{ bind.agent_id }}</td>
+                                    <td>
+                                        <div v-if="bind.user" class="flex-gap"
+                                            style="font-family: monospace; background: hsl(var(--muted)); padding: 0.25rem 0.5rem; border-radius: 4px; display: inline-flex;">
+                                            {{ bind.user }} : <span v-if="showPasswords">{{ bind.pass }}</span><span
+                                                v-else>••••••••</span>
+                                        </div>
+                                        <span v-else style="color: hsl(var(--muted-foreground));">None</span>
+                                    </td>
+                                    <td>{{ bind.usage_mb }} MB</td>
+                                    <td style="text-align: right;">
+                                        <div class="flex-gap" style="justify-content: flex-end;">
+                                            <button class="btn btn-secondary btn-sm"
+                                                @click="copyProxy(bind)">Copy</button>
+                                            <button class="btn btn-destructive btn-sm"
+                                                @click="unbindProxy(bind.port)">Kill</button>
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr v-if="binds.length === 0">
+                                    <td colspan="5"
+                                        style="text-align: center; color: hsl(var(--muted-foreground)); padding: 2rem;">
+                                        No active proxy ports.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Blacklist Editor -->
+                <div class="card">
+                    <h2>Access Control</h2>
+                    <p class="text-muted">Manage IP blacklist rules.</p>
+                    <div class="flex-gap" style="margin-bottom: 1.5rem;">
+                        <input type="text" v-model="newBlacklistIp" placeholder="IPv4 Address"
+                            @keyup.enter="addBlacklist">
+                        <button class="btn btn-secondary" @click="addBlacklist">Block</button>
+                    </div>
+                    <div
+                        style="max-height: 250px; overflow-y: auto; border: 1px solid hsl(var(--border)); border-radius: var(--radius);">
+                        <div v-for="ip in blacklist" :key="ip" class="flex-between"
+                            style="padding: 0.75rem 1rem; border-bottom: 1px solid hsl(var(--border));">
+                            <span style="font-family: monospace; font-size: 0.875rem;">{{ ip }}</span>
+                            <button class="btn btn-destructive btn-sm" @click="removeBlacklist(ip)">Remove</button>
+                        </div>
+                        <div v-if="blacklist.length === 0"
+                            style="padding: 1.5rem; text-align: center; color: hsl(var(--muted-foreground)); font-size: 0.875rem;">
+                            Blacklist is empty.
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div v-if="toastMessage" class="toast">{{ toastMessage }}</div>
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, onUnmounted } = Vue;
+
+        createApp({
+            setup() {
+                const isAuthenticated = ref(false);
+                const passwordInput = ref('');
+                const passwordHeader = ref('');
+
+                const agents = ref([]);
+                const binds = ref([]);
+                const blacklist = ref([]);
+
+                const openBindDialog = ref(false);
+                const newBind = ref({ agent_id: '', port: null, user: '', pass: '' });
+
+                const newBlacklistIp = ref('');
+                const toastMessage = ref('');
+                let stateInterval = null;
+
+                const showToast = (msg) => {
+                    toastMessage.value = msg;
+                    setTimeout(() => toastMessage.value = '', 3000);
+                };
+
+                const apiFetch = async (endpoint, options = {}) => {
+                    options.headers = {
+                        ...options.headers,
+                        'X-Server-Password': passwordHeader.value
+                    };
+                    const res = await fetch(endpoint, options);
+                    if (res.status === 401) {
+                        isAuthenticated.value = false;
+                        clearInterval(stateInterval);
+                        throw new Error("Unauthorized");
+                    }
+                    return res;
+                };
+
+                const login = async () => {
+                    passwordHeader.value = passwordInput.value;
+                    try {
+                        await fetchState();
+                        isAuthenticated.value = true;
+                        fetchBlacklist();
+                        stateInterval = setInterval(fetchState, 2000);
+                    } catch (e) {
+                        showToast('Authentication Failed');
+                    }
+                };
+
+                const fetchState = async () => {
+                    const res = await apiFetch('/api/state');
+                    const data = await res.json();
+                    agents.value = data.agents;
+                    binds.value = data.binds;
+                };
+
+                const fetchBlacklist = async () => {
+                    const res = await apiFetch('/api/blacklist');
+                    const data = await res.json();
+                    blacklist.value = data.blacklist;
+                };
+
+                const addBlacklist = async () => {
+                    if (!newBlacklistIp.value) return;
+                    await apiFetch('/api/blacklist', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ip: newBlacklistIp.value })
+                    });
+                    newBlacklistIp.value = '';
+                    showToast("IP Blocked");
+                    fetchBlacklist();
+                };
+
+                const removeBlacklist = async (ip) => {
+                    await apiFetch('/api/blacklist', {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ip })
+                    });
+                    showToast("Rule removed");
+                    fetchBlacklist();
+                };
+
+                const submitBind = async () => {
+                    if (!newBind.value.agent_id || !newBind.value.port) return showToast("Agent and Port required");
+                    const payload = {
+                        agent_id: newBind.value.agent_id,
+                        port: parseInt(newBind.value.port),
+                        user: newBind.value.user,
+                        pass: newBind.value.pass
+                    };
+                    const res = await apiFetch('/api/bind', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    if (res.ok) {
+                        showToast(`Proxy bound to ${payload.port}`);
+                        openBindDialog.value = false;
+                        newBind.value = { agent_id: '', port: null, user: '', pass: '' };
+                        fetchState();
+                    } else {
+                        const data = await res.json();
+                        showToast("Error: " + data.error);
+                    }
+                };
+
+                const unbindProxy = async (port) => {
+                    if (!confirm(`Terminate proxy on port ${port}?`)) return;
+                    await apiFetch('/api/unbind', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ port })
+                    });
+                    showToast(`Proxy ${port} terminated`);
+                    fetchState();
+                };
+
+                const fallbackCopyTextToClipboard = (text) => {
+                    if (navigator.clipboard && window.isSecureContext) {
+                        navigator.clipboard.writeText(text);
+                    } else {
+                        let textArea = document.createElement("textarea");
+                        textArea.value = text;
+                        textArea.style.position = "fixed";
+                        textArea.style.left = "-999999px";
+                        textArea.style.top = "-999999px";
+                        document.body.appendChild(textArea);
+                        textArea.focus();
+                        textArea.select();
+                        try { document.execCommand('copy'); } catch (err) { }
+                        document.body.removeChild(textArea);
+                    }
+                };
+
+                const copyResetLink = (agent_id) => {
+                    const link = `${window.location.protocol}//${window.location.host}/${agent_id}?reset_ip&pwd=${passwordHeader.value}`;
+                    fallbackCopyTextToClipboard(link);
+                    showToast("Link Copied");
+                };
+
+                const randomizeBind = () => {
+                    newBind.value.port = Math.floor(Math.random() * (65000 - 10000 + 1)) + 10000;
+                    const c = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+                    const rnd = (len) => Array.from({ length: len }, () => c[Math.floor(Math.random() * c.length)]).join('');
+                    newBind.value.user = 'user_' + rnd(6);
+                    newBind.value.pass = rnd(12);
+                };
+
+                const showPasswords = ref(false);
+
+                const getProxyString = (bind) => {
+                    const ip = window.location.hostname;
+                    if (bind.user && bind.pass) {
+                        return `${ip}:${bind.port}:${bind.user}:${bind.pass}`;
+                    }
+                    return `${ip}:${bind.port}`;
+                };
+
+                const copyProxy = (bind) => {
+                    fallbackCopyTextToClipboard(getProxyString(bind));
+                    showToast(`Proxy ${bind.port} Copied`);
+                };
+
+                const copyAllProxies = () => {
+                    if (binds.value.length === 0) return showToast("No proxies to copy");
+                    const text = binds.value.map(b => getProxyString(b)).join('\n');
+                    fallbackCopyTextToClipboard(text);
+                    showToast(`${binds.value.length} Proxies Copied`);
+                };
+
+                onUnmounted(() => clearInterval(stateInterval));
+
+                return {
+                    isAuthenticated, passwordInput, login,
+                    agents, binds, blacklist,
+                    openBindDialog, newBind, submitBind, unbindProxy,
+                    newBlacklistIp, addBlacklist, removeBlacklist,
+                    copyResetLink, toastMessage, passwordHeader,
+                    randomizeBind, showPasswords, copyProxy, copyAllProxies
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+
+</html>
