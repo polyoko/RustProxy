@@ -27,11 +27,11 @@ Download the latest pre-compiled server executable for Linux or Windows from the
 ### 2. Run the Server
 Upload the executable to your public VPS (like Ubuntu or Debian). Run it from the terminal and provide a secure password:
 ```bash
-./rust_proxy server -p "MySecurePassword123" --control-port 8080 --api-port 8081
+./rust_proxy server -c 8080 -a 8081 -p "MySecurePassword123"
 ```
 
-- `--api-port 8081`: This is where your Web Dashboard is hosted.
-- `--control-port 8080`: This is the port your Android/PC agents connect to.
+- `-a 8081`: This is where your Web Dashboard is hosted.
+- `-c 8080`: This is the port your Android/PC agents connect to.
 
 ### 3. Open the Dashboard
 Go to your VPS IP in your browser:
