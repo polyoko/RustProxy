@@ -2,7 +2,7 @@
   <img src="https://lh3.googleusercontent.com/83zgoeJAlOS95s4Z5fQNNtWK5QJngsEWDMQRGeYuMKkABGDbMEoeeFMyqvEpzKBh1krBHA-0Qr8ILCmSKD3egg" width="150" alt="RustProxy Logo" />
   <h1>RustProxy</h1>
   <p><b>Reverse SOCKS5 Tunnel Server and Client</b></p>
-  <a href="#"><img src="https://img.shields.io/badge/Google_Play-Get_it_on_Play_Store-green?logo=google-play&style=for-the-badge" alt="Get it on Google Play" /></a>
+  <a href="https://play.google.com/store/apps/details?id=com.barissenel.rustproxy"><img src="https://img.shields.io/badge/Google_Play-Get_it_on_Play_Store-green?logo=google-play&style=for-the-badge" alt="Get it on Google Play" /></a>
 </div>
 
 ---
