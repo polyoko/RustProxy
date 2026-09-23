@@ -314,9 +314,18 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
                 return;
             }
             let vps_ip = if host.is_empty() { "127.0.0.1" } else { &host };
+            let public_host = std::env::var("RUST_PROXY_PUBLIC_HOST")
+                .ok()
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| vps_ip.to_string());
+            let public_port = std::env::var("RUST_PROXY_PUBLIC_PORT")
+                .ok()
+                .and_then(|value| value.parse::<u16>().ok())
+                .filter(|port| *port != 0)
+                .unwrap_or(control_port);
             let payload = serde_json::json!({
-                "h": vps_ip,
-                "p": control_port,
+                "h": public_host,
+                "p": public_port,
                 "pwd": expected_pw
             });
             let qrcode = match qrcode::QrCode::new(payload.to_string().as_bytes()) {
