@@ -28,6 +28,11 @@ lazy_static::lazy_static! {
     static ref DNS_CACHE: DashMap<String, (SocketAddr, std::time::Instant)> = DashMap::new();
 }
 const DNS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+const RESET_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn reset_is_allowed(last_reset: Option<tokio::time::Instant>) -> bool {
+    last_reset.map_or(true, |last| last.elapsed() >= RESET_COOLDOWN)
+}
 
 pub struct AgentEntry {
     pub control_tx: mpsc::Sender<TunnelCmd>,
@@ -36,6 +41,8 @@ pub struct AgentEntry {
     pub usage: Arc<AtomicU64>,
     pub os_type: u8,
     pub ip_reset_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::oneshot::Sender<bool>>>>,
+    pub reset_token: String,
+    pub reset_last_at: Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
 }
 
 pub type AgentRegistry = Arc<DashMap<String, AgentEntry>>;
@@ -59,8 +66,8 @@ pub struct BoundSocksListener {
 pub async fn run_server(
     control_port: u16, 
     api_port: u16,
-    server_pw: Option<String>, 
-    api_server_pw: Option<String>,
+    agent_password: Option<String>,
+    admin_password: String,
     registry: AgentRegistry, 
     bind_registry: BindRegistry,
     cumulative_usage: Arc<DashMap<String, u64>>
@@ -71,20 +78,22 @@ pub async fn run_server(
     let listener = TcpListener::bind(&bind_addr).await?;
     info!("Tunnel Listener active on {}", bind_addr);
 
-    let api_bind = format!("0.0.0.0:{}", api_port);
+    let api_bind = format!("127.0.0.1:{}", api_port);
     if let Ok(api_listener) = TcpListener::bind(&api_bind).await {
         info!("API Listener active on {}", api_bind);
         let registry_for_api = Arc::clone(&registry);
         let bind_registry_for_api = Arc::clone(&bind_registry);
-        let api_pw_clone = api_server_pw.clone();
+        let agent_pw_clone = agent_password.clone();
+        let admin_pw_clone = admin_password.clone();
         tokio::spawn(async move {
             loop {
-                if let Ok((stream, _)) = api_listener.accept().await {
+                if let Ok((stream, addr)) = api_listener.accept().await {
                     let reg_clone = Arc::clone(&registry_for_api);
                     let breg_clone = Arc::clone(&bind_registry_for_api);
-                    let pw_clone = api_pw_clone.clone();
+                    let agent_pw = agent_pw_clone.clone();
+                    let admin_pw = admin_pw_clone.clone();
                     tokio::spawn(async move {
-                        handle_api_connection(stream, reg_clone, breg_clone, pw_clone, control_port).await;
+                        handle_api_connection(stream, addr, reg_clone, breg_clone, agent_pw, admin_pw, control_port).await;
                     });
                 }
             }
@@ -104,7 +113,7 @@ pub async fn run_server(
 
                 let registry_clone = Arc::clone(&registry);
                 let usage_clone = Arc::clone(&cumulative_usage);
-                let server_pw_clone = server_pw.clone();
+                let agent_pw_clone = agent_password.clone();
                 
                 tokio::spawn(async move {
                     let _ = stream.set_nodelay(true);
@@ -113,7 +122,7 @@ pub async fn run_server(
 
                     match type_buf[0] {
                         0x00 => {
-                            if let Err(e) = handle_control_connection(stream, addr, server_pw_clone, registry_clone, usage_clone).await {
+                            if let Err(e) = handle_control_connection(stream, addr, agent_pw_clone, registry_clone, usage_clone).await {
                                 error!("Control Connection Error [{}]: {}", addr, e);
                             }
                         }
@@ -171,6 +180,8 @@ async fn handle_control_connection(
     let initial_usage = cumulative_usage.get(&agent_id).map(|v| *v).unwrap_or(0);
     let usage = Arc::new(AtomicU64::new(initial_usage));
     let ip_reset_tx = Arc::new(tokio::sync::Mutex::new(None));
+    let reset_token = crate::session::random_token()?;
+    let reset_last_at = Arc::new(tokio::sync::Mutex::new(None));
     registry.insert(agent_id.clone(), AgentEntry {
         control_tx,
         active_requests: Arc::clone(&active_requests),
@@ -178,6 +189,8 @@ async fn handle_control_connection(
         usage: Arc::clone(&usage),
         os_type,
         ip_reset_tx: Arc::clone(&ip_reset_tx),
+        reset_token,
+        reset_last_at,
     });
 
     let mut control_stream = stream;
@@ -252,7 +265,20 @@ async fn handle_control_connection(
     Ok(())
 }
 
-async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, bind_registry: BindRegistry, server_pw: Option<String>, control_port: u16) {
+async fn handle_api_connection(
+    mut stream: TcpStream,
+    peer_addr: SocketAddr,
+    registry: AgentRegistry,
+    bind_registry: BindRegistry,
+    agent_password: Option<String>,
+    admin_password: String,
+    control_port: u16,
+) {
+    let peer_ip = peer_addr.ip().to_string();
+    if security::is_blacklisted(&peer_ip) {
+        let _ = stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Too many attempts\"}").await;
+        return;
+    }
     let mut buf = vec![0u8; 8192];
     if let Ok(n) = stream.read(&mut buf).await {
         if n == 0 { return; }
@@ -290,10 +316,9 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
             }
         }
 
-        let expected_pw = server_pw.clone().unwrap_or_default();
+        let expected_pw = admin_password;
         let session_token = crate::session::token_from_cookie_header(&cookie_header);
-        let mut is_authed = expected_pw.is_empty()
-            || crate::session::constant_time_eq(&x_pw, &expected_pw)
+        let is_authed = crate::session::constant_time_eq(&x_pw, &expected_pw)
             || session_token.map_or(false, crate::session::is_valid);
 
         // Path Validation
@@ -302,16 +327,6 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
         } else {
             (path, "")
         };
-
-        // Query auth fallback
-        for pair in query.split('&') {
-            let mut kv = pair.split('=');
-            if let (Some("pwd"), Some(val)) = (kv.next(), kv.next()) {
-                if !expected_pw.is_empty() && val == expected_pw {
-                    is_authed = true;
-                }
-            }
-        }
 
         if base_path == "/" || base_path == "/index.html" {
             let html = include_str!("web_ui.html");
@@ -327,9 +342,12 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
             let resp = match password {
                 None => "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Bad request\"}".to_string(),
                 Some(pw) if !crate::session::constant_time_eq(&pw, &expected_pw) => {
+                    security::report_failure(&peer_ip);
                     "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Unauthorized\"}".to_string()
                 }
-                Some(_) => match crate::session::create() {
+                Some(_) => {
+                    security::report_success(&peer_ip);
+                    match crate::session::create() {
                     Ok(token) => format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}\r\nConnection: close\r\n\r\n{{\"ok\":true}}",
                         crate::session::set_cookie_header(&token, is_https)
@@ -338,7 +356,8 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
                         error!("Failed to create dashboard session: {}", e);
                         "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Internal error\"}".to_string()
                     }
-                },
+                    }
+                }
             };
             let _ = stream.write_all(resp.as_bytes()).await;
             return;
@@ -357,17 +376,24 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
         }
 
         if base_path.starts_with("/api/") && !is_authed {
+            security::report_failure(&peer_ip);
             let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Unauthorized\"}";
             let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }
 
+        if base_path.starts_with("/api/") {
+            security::report_success(&peer_ip);
+        }
+
         if base_path == "/qr" {
             if !is_authed {
+                security::report_failure(&peer_ip);
                 let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\n\r\nUnauthorized";
                 let _ = stream.write_all(resp.as_bytes()).await;
                 return;
             }
+            security::report_success(&peer_ip);
             let vps_ip = if host.is_empty() { "127.0.0.1" } else { &host };
             let public_host = std::env::var("RUST_PROXY_PUBLIC_HOST")
                 .ok()
@@ -381,7 +407,7 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
             let payload = serde_json::json!({
                 "h": public_host,
                 "p": public_port,
-                "pwd": expected_pw
+                "pwd": agent_password.unwrap_or_default()
             });
             let qrcode = match qrcode::QrCode::new(payload.to_string().as_bytes()) {
                 Ok(q) => q,
@@ -405,18 +431,33 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
             return;
         }
 
-        if base_path.ends_with("?reset_ip") || query == "reset_ip" || query.starts_with("reset_ip&") {
-            if !expected_pw.is_empty() && !is_authed {
+        if query.split('&').any(|part| part == "reset_ip") {
+            let token = query.split('&').find_map(|part| part.split_once('=').and_then(|(key, value)| (key == "token").then_some(value)));
+            let agent_id = base_path.trim_start_matches('/');
+            if token.is_none() {
                 let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Unauthorized\"}";
                 let _ = stream.write_all(resp.as_bytes()).await;
                 return;
             }
-            let agent_id = base_path.trim_start_matches('/');
             if let Some(agent) = registry.get(agent_id) {
+                if !crate::session::constant_time_eq(token.unwrap(), &agent.reset_token) {
+                    let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Unauthorized\"}";
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                    return;
+                }
                 if agent.os_type != 1 {
                     let resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Agent is not Android\"}";
                     let _ = stream.write_all(resp.as_bytes()).await;
                     return;
+                }
+                {
+                    let mut last_reset = agent.reset_last_at.lock().await;
+                    if !reset_is_allowed(*last_reset) {
+                        let resp = "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Too many attempts\"}";
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+                    *last_reset = Some(tokio::time::Instant::now());
                 }
                 let (tx, _rx) = tokio::sync::oneshot::channel();
                 {
@@ -427,6 +468,7 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
                     let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"status\":\"reset_command_sent\"}";
                     let _ = stream.write_all(resp.as_bytes()).await;
                 } else {
+                    *agent.reset_last_at.lock().await = None;
                     let resp = "HTTP/1.1 500 Error\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Failed to command agent\"}";
                     let _ = stream.write_all(resp.as_bytes()).await;
                 }
@@ -445,7 +487,8 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
                     "id": entry.key(),
                     "addr": entry.value().addr.to_string(),
                     "usage_mb": format!("{:.2}", usage_mb),
-                    "os": if entry.value().os_type == 1 { "Android" } else { "PC" }
+                    "os": if entry.value().os_type == 1 { "Android" } else { "PC" },
+                    "reset_url": format!("/{}?reset_ip&token={}", entry.key(), entry.value().reset_token)
                 }));
             }
             let mut binds_arr = Vec::new();
@@ -455,7 +498,6 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
                     "port": entry.key(),
                     "agent_id": entry.value().agent_id,
                     "user": entry.value().user.clone().unwrap_or_default(),
-                    "pass": entry.value().pass.clone().unwrap_or_default(),
                     "usage_mb": format!("{:.2}", usage_mb)
                 }));
             }
@@ -480,6 +522,12 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
                 ) {
                     let socks_user = json["user"].as_str().filter(|s| !s.is_empty()).map(String::from);
                     let socks_pass = json["pass"].as_str().filter(|s| !s.is_empty()).map(String::from);
+
+                    if socks_user.is_none() || socks_pass.is_none() {
+                        let resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Missing credentials\"}";
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        return;
+                    }
 
                     if !is_socks_port(port) {
                         let resp = format!(
@@ -665,7 +713,7 @@ pub async fn run_socks_listener(
             }
             accept_res = socks_listener.accept() => {
                 match accept_res {
-                    Ok((mut client_stream, addr)) => {
+                    Ok((client_stream, addr)) => {
                         let agent_info = if let Some(agent) = registry.get(&agent_id) {
                             Some((
                                 agent.control_tx.clone(),
@@ -681,19 +729,25 @@ pub async fn run_socks_listener(
                             let bind_usage_clone = Arc::clone(&bind_usage);
                             let s_user = socks_user.clone();
                             let s_pass = socks_pass.clone();
+                            let timing_agent = agent_id.clone();
                             
                             tokio::spawn(async move {
                                 let _ = client_stream.set_nodelay(true);
-                                if let Err(e) = socks5::handle_client(client_stream, Some(signal_tx), Some(agent_active_requests), s_user, s_pass, agent_usage, Some(bind_usage_clone), socks_port).await {
+                                if let Err(e) = socks5::handle_client(client_stream, Some(signal_tx), Some(agent_active_requests), s_user, s_pass, agent_usage, Some(bind_usage_clone), socks_port, Some(timing_agent)).await {
                                     error!("SOCKS Client Error [{}]: {}", addr, e);
                                 }
                             });
                         } else {
                             warn!("Agent '{}' is currently offline. Rejecting SOCKS client from {}", agent_id, addr);
+                            let s_user = socks_user.clone();
+                            let s_pass = socks_pass.clone();
+                            let timing_agent = agent_id.clone();
+                            let bind_usage_clone = Arc::clone(&bind_usage);
                             tokio::spawn(async move {
                                 let _ = client_stream.set_nodelay(true);
-                                // Write SOCKS5 Host Unreachable error (0x04)
-                                let _ = client_stream.write_all(&[0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                                if let Err(e) = socks5::handle_client(client_stream, None, None, s_user, s_pass, Arc::new(AtomicU64::new(0)), Some(bind_usage_clone), socks_port, Some(timing_agent)).await {
+                                    error!("Offline SOCKS Client Error [{}]: {}", addr, e);
+                                }
                             });
                         }
                     }
@@ -879,7 +933,7 @@ async fn handle_agent_data_conn(server_addr: String, agent_id: String, usage: Ar
     stream.write_all(&handshake).await?; 
     
     // Agent acts as SOCKS server for the Tunneled connection (No Auth needed internally)
-    socks5::handle_client(stream, None, None, None, None, usage, None, 0).await
+    socks5::handle_client(stream, None, None, None, None, usage, None, 0, None).await
 }
 
 async fn handle_agent_udp_session(server_addr_str: String, server_udp_port: u16) -> Result<()> {
@@ -999,5 +1053,11 @@ mod tests {
         assert!(is_socks_port(SOCKS_PORT_MIN));
         assert!(is_socks_port(SOCKS_PORT_MAX));
         assert!(!is_socks_port(SOCKS_PORT_MAX + 1));
+    }
+
+    #[test]
+    fn reset_cooldown_rejects_immediate_repeat() {
+        assert!(!reset_is_allowed(Some(tokio::time::Instant::now())));
+        assert!(reset_is_allowed(Some(tokio::time::Instant::now() - RESET_COOLDOWN - std::time::Duration::from_secs(1))));
     }
 }

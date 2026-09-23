@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>RustProxy Dashboard</title>
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js" integrity="sha384-W/1Fp/LgAYO/oTn9Gs+PbeWuMuq1eQCnUMPCeg8POmMYchhzxctjEqtbiCIxDOON" crossorigin="anonymous"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -303,7 +303,7 @@
         <div class="login-overlay" v-if="authChecked && !isAuthenticated">
             <div class="card" style="width: 100%; max-width: 380px;">
                 <h2 style="text-align: center;">Sign In</h2>
-                <p class="text-muted" style="text-align: center;">Enter your server password to continue.</p>
+                <p class="text-muted" style="text-align: center;">Enter your admin password to continue.</p>
                 <form @submit.prevent="login" style="display: flex; flex-direction: column; gap: 1rem;">
                     <input type="password" v-model="passwordInput" placeholder="Password" autofocus required>
                     <button type="submit" class="btn btn-primary">Authenticate</button>
@@ -358,7 +358,7 @@
                                     <td><span class="badge">{{ agent.os }}</span></td>
                                     <td>{{ agent.usage_mb }} MB</td>
                                     <td style="text-align: right;">
-                                        <button v-if="agent.os === 'Android'" @click="copyResetLink(agent.id)"
+                                        <button v-if="agent.os === 'Android'" @click="copyResetLink(agent)"
                                             class="btn btn-secondary btn-sm" title="Copy Reset Link">Copy Link</button>
                                     </td>
                                 </tr>
@@ -380,10 +380,6 @@
                             <p class="text-muted">{{ socksHost ? `${socksHost}:${socksPortMin}-${socksPortMax}` : `Configure SOCKS host; ports ${socksPortMin}-${socksPortMax}` }}</p>
                         </div>
                         <div class="flex-gap">
-                            <button class="btn btn-outline" @click="showPasswords = !showPasswords">
-                                {{ showPasswords ? 'Hide Passwords' : 'Show Passwords' }}
-                            </button>
-                            <button class="btn btn-outline" @click="copyAllProxies">Copy All</button>
                             <button class="btn btn-primary" @click="openBindDialog = !openBindDialog">
                                 {{ openBindDialog ? 'Cancel' : 'Create Proxy' }}
                             </button>
@@ -400,8 +396,8 @@
                             </select>
                             <input type="number" v-model="newBind.port" :min="socksPortMin" :max="socksPortMax"
                                 :placeholder="`Port (${socksPortMin}-${socksPortMax})`" required>
-                            <input type="text" v-model="newBind.user" placeholder="Auth Username">
-                            <input type="password" v-model="newBind.pass" placeholder="Auth Password">
+                            <input type="text" v-model="newBind.user" placeholder="Auth Username" required>
+                            <input type="password" v-model="newBind.pass" placeholder="Auth Password" required>
                             <div class="flex-gap">
                                 <button class="btn btn-secondary" @click="randomizeBind"
                                     title="Randomize Credentials">🎲</button>
@@ -416,7 +412,7 @@
                                 <tr>
                                     <th>Port</th>
                                     <th>Target</th>
-                                    <th>Credentials</th>
+                                    <th>Username</th>
                                     <th>Bandwidth</th>
                                     <th style="text-align: right;">Actions</th>
                                 </tr>
@@ -426,18 +422,11 @@
                                     <td style="font-weight: 600;">{{ bind.port }}</td>
                                     <td style="color: hsl(var(--muted-foreground));">{{ bind.agent_id }}</td>
                                     <td>
-                                        <div v-if="bind.user" class="flex-gap"
-                                            style="font-family: monospace; background: hsl(var(--muted)); padding: 0.25rem 0.5rem; border-radius: 4px; display: inline-flex;">
-                                            {{ bind.user }} : <span v-if="showPasswords">{{ bind.pass }}</span><span
-                                                v-else>••••••••</span>
-                                        </div>
-                                        <span v-else style="color: hsl(var(--muted-foreground));">None</span>
+                                        <span style="font-family: monospace;">{{ bind.user }}</span>
                                     </td>
                                     <td>{{ bind.usage_mb }} MB</td>
                                     <td style="text-align: right;">
                                         <div class="flex-gap" style="justify-content: flex-end;">
-                                            <button class="btn btn-secondary btn-sm"
-                                                @click="copyProxy(bind)">Copy</button>
                                             <button class="btn btn-destructive btn-sm"
                                                 @click="unbindProxy(bind.port)">Kill</button>
                                         </div>
@@ -490,7 +479,6 @@
                 const isAuthenticated = ref(false);
                 const authChecked = ref(false);
                 const passwordInput = ref('');
-                const passwordHeader = ref('');
 
                 const agents = ref([]);
                 const binds = ref([]);
@@ -538,8 +526,6 @@
                             body: JSON.stringify({ password: passwordInput.value })
                         });
                         if (!res.ok) throw new Error('login failed');
-                        // kept in memory only, for the shareable reset link
-                        passwordHeader.value = passwordInput.value;
                         passwordInput.value = '';
                         await fetchState();
                         startDashboard();
@@ -551,7 +537,6 @@
                 const logout = async () => {
                     clearInterval(stateInterval);
                     await fetch('/api/logout', { method: 'POST' }).catch(() => {});
-                    passwordHeader.value = '';
                     isAuthenticated.value = false;
                 };
 
@@ -594,7 +579,7 @@
                 };
 
                 const submitBind = async () => {
-                    if (!newBind.value.agent_id || !newBind.value.port) return showToast("Agent and Port required");
+                    if (!newBind.value.agent_id || !newBind.value.port || !newBind.value.user || !newBind.value.pass) return showToast("Agent, port, username, and password required");
                     const port = Number(newBind.value.port);
                     if (!Number.isInteger(port) || port < socksPortMin.value || port > socksPortMax.value) {
                         return showToast(`Port must be between ${socksPortMin.value} and ${socksPortMax.value}`);
@@ -611,7 +596,10 @@
                         body: JSON.stringify(payload)
                     });
                     if (res.ok) {
-                        showToast(`Proxy bound to ${payload.port}`);
+                        if (socksHost.value) {
+                            fallbackCopyTextToClipboard(`${socksHost.value}:${payload.port}:${payload.user}:${payload.pass}`);
+                        }
+                        showToast(`Proxy bound to ${payload.port}; credentials copied`);
                         openBindDialog.value = false;
                         newBind.value = { agent_id: '', port: null, user: '', pass: '' };
                         fetchState();
@@ -649,14 +637,8 @@
                     }
                 };
 
-                const copyResetLink = (agent_id) => {
-                    // ponytail: reset link still embeds the admin password until T2.3 gives per-agent tokens
-                    if (!passwordHeader.value) {
-                        const pw = window.prompt('Enter server password to build the reset link');
-                        if (!pw) return;
-                        passwordHeader.value = pw;
-                    }
-                    const link = `${window.location.protocol}//${window.location.host}/${agent_id}?reset_ip&pwd=${passwordHeader.value}`;
+                const copyResetLink = (agent) => {
+                    const link = new URL(agent.reset_url, window.location.origin).href;
                     fallbackCopyTextToClipboard(link);
                     showToast("Link Copied");
                 };
@@ -667,31 +649,6 @@
                     const rnd = (len) => Array.from({ length: len }, () => c[Math.floor(Math.random() * c.length)]).join('');
                     newBind.value.user = 'user_' + rnd(6);
                     newBind.value.pass = rnd(12);
-                };
-
-                const showPasswords = ref(false);
-
-                const getProxyString = (bind) => {
-                    if (!socksHost.value) return '';
-                    if (bind.user && bind.pass) {
-                        return `${socksHost.value}:${bind.port}:${bind.user}:${bind.pass}`;
-                    }
-                    return `${socksHost.value}:${bind.port}`;
-                };
-
-                const copyProxy = (bind) => {
-                    const proxy = getProxyString(bind);
-                    if (!proxy) return showToast('SOCKS host is not configured');
-                    fallbackCopyTextToClipboard(proxy);
-                    showToast(`Proxy ${bind.port} Copied`);
-                };
-
-                const copyAllProxies = () => {
-                    if (binds.value.length === 0) return showToast("No proxies to copy");
-                    if (!socksHost.value) return showToast('SOCKS host is not configured');
-                    const text = binds.value.map(b => getProxyString(b)).join('\n');
-                    fallbackCopyTextToClipboard(text);
-                    showToast(`${binds.value.length} Proxies Copied`);
                 };
 
                 onMounted(async () => {
@@ -712,8 +669,7 @@
                     agents, binds, blacklist, socksHost, socksPortMin, socksPortMax,
                     openBindDialog, newBind, submitBind, unbindProxy,
                     newBlacklistIp, addBlacklist, removeBlacklist,
-                    copyResetLink, toastMessage, passwordHeader,
-                    randomizeBind, showPasswords, copyProxy, copyAllProxies
+                    copyResetLink, toastMessage, randomizeBind
                 };
             }
         }).mount('#app');

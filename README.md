@@ -25,20 +25,21 @@ RustProxy is a reverse proxy tunneling tool. It allows Android phones, PCs, or I
 Download the latest pre-compiled server executable for Linux or Windows from the [Releases page](../../releases).
 
 ### 2. Run the Server
-Upload the executable to your public VPS (like Ubuntu or Debian). Run it from the terminal and provide a secure password:
+Upload the executable to your public VPS (like Ubuntu or Debian). Use a separate agent password and admin password:
 ```bash
-./rust_proxy server -c 8080 -a 8081 -p "MySecurePassword123"
+./rust_proxy server -c 8080 -a 8081 -p "AgentPassword123" --admin-password "AdminPassword123"
 ```
 
-- `-a 8081`: This is where your Web Dashboard is hosted.
+- `-a 8081`: Dashboard/API port, bound only to `127.0.0.1`.
 - `-c 8080`: This is the port your Android/PC agents connect to.
+- `-p`: Agent password. `--admin-password`: dashboard and API password.
 
 ### 3. Open the Dashboard
-Go to your VPS IP in your browser:
+Create an SSH tunnel from your workstation:
 ```
-http://<YOUR_VPS_IP>:8081/
+ssh -L 8081:127.0.0.1:8081 <user>@<YOUR_VPS_IP>
 ```
-Enter the password you started the server with to gain access.
+Then open `http://127.0.0.1:8081/` and enter the admin password.
 
 ## Production network layout
 
@@ -46,11 +47,11 @@ Keep the dashboard and raw TCP traffic on different hostnames:
 
 | Purpose | Hostname | Cloudflare | Public port | Container port |
 | --- | --- | --- | --- | --- |
-| Dashboard | `proxy.example.com` | Proxied | `443` | `8081` |
+| Dashboard | SSH tunnel or TLS reverse proxy | N/A | private | `127.0.0.1:8081` |
 | Agent control | `agent.example.com` | DNS only | `18080` | `8080` |
 | SOCKS proxies | `socks.example.com` | DNS only | `51300-51399` | `51300-51399` |
 
-For Coolify, set the dashboard Domain to `https://proxy.example.com:8081`, port mappings to `18080:8080,51300-51399:51300-51399,51300-51399:51300-51399/udp`, and set:
+For Coolify, do not publish port 8081. Use a TLS reverse proxy that can reach the container's loopback API, or an SSH tunnel. Publish `18080:8080,51300-51399:51300-51399,51300-51399:51300-51399/udp`, and set:
 
 ```text
 RUST_PROXY_PUBLIC_HOST=agent.example.com
@@ -58,7 +59,7 @@ RUST_PROXY_PUBLIC_PORT=18080
 RUST_PROXY_SOCKS_HOST=socks.example.com
 ```
 
-The dashboard only creates TCP SOCKS binds in that published range; UDP ASSOCIATE uses the same published UDP range. Create `proxy` as a proxied DNS record, `agent` and `socks` as DNS-only records, and restrict the server's port 443 ingress to Cloudflare IP ranges. Do not publish container port 8081 or place agent/SOCKS TCP/UDP traffic behind Cloudflare's standard HTTP proxy.
+The dashboard only creates TCP SOCKS binds in that published range; UDP ASSOCIATE uses the same published UDP range. Create `agent` and `socks` as DNS-only records. Do not publish container port 8081 or place agent/SOCKS TCP/UDP traffic behind Cloudflare's standard HTTP proxy.
 
 ---
 
@@ -78,7 +79,7 @@ You can run the RustProxy agent directly on any PC (Windows, Linux, macOS) to ex
 1. Download the pre-compiled `rust_proxy` executable for your OS from the [Releases page](../../releases).
 2. Run the executable in `agent` mode, pointing it to your public Control Server:
 ```bash
-./rust_proxy agent -s "<YOUR_VPS_IP>:8080" -a "MyDesktopPC" -p "MySecurePassword123"
+./rust_proxy agent -s "<YOUR_VPS_IP>:8080" -a "MyDesktopPC" -p "AgentPassword123"
 ```
 - `-s`: The IP and Port of your Control Server (use the `--control-port`, not the api port).
 - `-a`: Your custom Agent ID name to display in the Dashboard.
@@ -95,8 +96,8 @@ To allow the server to toggle airplane mode and force a new cellular IP:
 
 ## Security Best Practices
 
-- Ensure your server is launched with a strong `-p` password, as the Web Dashboard and API endpoints are public and require it.
-- Never share the IP reset links publicly; they contain your password embedded in them.
+- Use distinct strong `-p` and `--admin-password` values. The dashboard/API is private on `127.0.0.1`.
+- Never share IP reset links publicly; each grants a short-rate-limited reset command for one agent.
 
 ---
 

@@ -10,6 +10,7 @@ use crate::tunnel::{SOCKS_PORT_MAX, SOCKS_PORT_MIN};
 use crate::tunnel_common::{TunnelCmd, TunnelSignalTx, AgentRequestRegistry};
 use crate::security;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::time::{timeout, Duration};
 
 lazy_static::lazy_static! {
@@ -23,6 +24,10 @@ const CMD_UDP_ASSOCIATE: u8 = 0x03;
 const ATYP_IPV4: u8 = 0x01;
 const ATYP_DOMAIN: u8 = 0x03;
 
+fn is_tunneled_udp_client(client_ip: IpAddr, source: SocketAddr) -> bool {
+    source.ip() == client_ip
+}
+
 pub async fn handle_client(
     mut stream: TcpStream, 
     signal_tx: Option<TunnelSignalTx>, 
@@ -32,6 +37,7 @@ pub async fn handle_client(
     agent_usage: Arc<AtomicU64>,
     bind_usage: Option<Arc<AtomicU64>>,
     socks_port: u16,
+    timing_agent: Option<String>,
 ) -> Result<()> {
     let peer = stream.peer_addr().ok();
     if let Some(p) = peer {
@@ -67,7 +73,7 @@ pub async fn handle_client(
 
     match cmd {
         CMD_CONNECT => {
-            handle_connect(&mut stream, addr, signal_tx, data_rx, agent_usage, bind_usage, socks_port).await
+            handle_connect(&mut stream, addr, signal_tx, data_rx, agent_usage, bind_usage, socks_port, timing_agent.as_deref()).await
         }
         CMD_UDP_ASSOCIATE => {
              handle_udp_associate_request(&mut stream, addr, signal_tx, agent_usage, bind_usage, socks_port).await
@@ -143,63 +149,87 @@ async fn handle_connect(
     agent_usage: Arc<AtomicU64>,
     bind_usage: Option<Arc<AtomicU64>>,
     socks_port: u16,
+    timing_agent: Option<&str>,
 ) -> Result<()> {
     let log_target = format!("bind:{}", socks_port);
     info!(target: &log_target, "Connect request for {}", target_addr);
-    
-    let target_stream_result = if let (Some(tx), Some(registry)) = (signal_tx, data_rx) {
+    let started = Instant::now();
+    let mut data_conn_ms = 0;
+    let mut greeting_rtt_ms = 0;
+    let mut connect_reply_ms = 0;
+    let mut result = "error";
+
+    let target_stream_result: Result<TcpStream> = async {
+        if let (Some(tx), Some(registry)) = (signal_tx, data_rx) {
         let request_id = NEXT_REQUEST_ID.fetch_add(1, Ordering::SeqCst);
         let (wait_tx, wait_rx) = tokio::sync::oneshot::channel::<TcpStream>();
-        
         registry.insert(request_id, wait_tx);
-        
+
         info!("Requesting Tunnel Connection for {} (id={})", target_addr, request_id);
         if let Err(e) = tx.send(TunnelCmd::RequireConn(request_id)).await {
             error!("Failed to signal agent: {}", e);
             registry.remove(&request_id);
+            result = "agent_offline";
             return Err(e.into());
         }
-        
+
         match timeout(Duration::from_secs(10), wait_rx).await {
             Ok(Ok(mut agent_stream)) => {
+                data_conn_ms = started.elapsed().as_millis();
+
+                let greeting_started = Instant::now();
                 agent_stream.write_all(&[0x05, 0x01, 0x00]).await?;
-                
                 let mut buf = [0u8; 2];
                 agent_stream.read_exact(&mut buf).await?;
+                greeting_rtt_ms = greeting_started.elapsed().as_millis();
                 if buf[0] != 0x05 || buf[1] != 0x00 {
                     return Err(anyhow!("Agent refused handshake: {:?}", buf));
                 }
-                
+
+                let connect_started = Instant::now();
                 let req = build_connect_packet(&target_addr)?;
                 agent_stream.write_all(&req).await?;
-                
                 let (rep, _bind_addr) = read_packet(&mut agent_stream).await?;
+                connect_reply_ms = connect_started.elapsed().as_millis();
                 if rep != 0x00 {
                      return Err(anyhow!("Agent reported error connecting to target: {}", rep));
                 }
-                
                 Ok(agent_stream)
             },
             Ok(Err(_)) => {
                 registry.remove(&request_id);
+                result = "agent_offline";
                 Err(anyhow::anyhow!("Agent data channel dropped for request {}", request_id))
             },
             Err(_) => {
                 registry.remove(&request_id);
+                data_conn_ms = started.elapsed().as_millis();
+                result = "timeout";
                 Err(anyhow::anyhow!("Timeout waiting for agent data connection for request {}", request_id))
             }
         }
+    } else if timing_agent.is_some() {
+        result = "agent_offline";
+        Err(anyhow!("Agent is offline"))
     } else {
         let stream = TcpStream::connect(&target_addr).await.context("Failed to connect to target")?;
         let _ = stream.set_nodelay(true);
-        Ok::<TcpStream, anyhow::Error>(stream)
-    };
+        Ok(stream)
+    }
+    }.await;
 
     match target_stream_result {
         Ok(target_stream) => {
-            target_stream.set_nodelay(true)?;
+            if let Err(e) = target_stream.set_nodelay(true) {
+                log_connect_timing(timing_agent, socks_port, &target_addr, data_conn_ms, greeting_rtt_ms, connect_reply_ms, started.elapsed().as_millis(), "error");
+                return Err(e.into());
+            }
              let local_addr = target_stream.local_addr().unwrap_or(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0,0,0,0)), 0));
-             write_reply(stream, 0x00, &local_addr).await?;
+             if let Err(e) = write_reply(stream, 0x00, &local_addr).await {
+                 log_connect_timing(timing_agent, socks_port, &target_addr, data_conn_ms, greeting_rtt_ms, connect_reply_ms, started.elapsed().as_millis(), "error");
+                 return Err(e);
+             }
+             log_connect_timing(timing_agent, socks_port, &target_addr, data_conn_ms, greeting_rtt_ms, connect_reply_ms, started.elapsed().as_millis(), "ok");
              
              let (mut client_reader, mut client_writer) = tokio::io::split(stream);
              let (mut target_reader, mut target_writer) = tokio::io::split(target_stream);
@@ -237,9 +267,64 @@ async fn handle_connect(
         }
         Err(e) => {
             error!("Failed to connect to {}: {}", target_addr, e);
-            write_reply(stream, 0x04, &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)).await?;
+            if let Err(reply_error) = write_reply(stream, 0x04, &SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0)).await {
+                log_connect_timing(timing_agent, socks_port, &target_addr, data_conn_ms, greeting_rtt_ms, connect_reply_ms, started.elapsed().as_millis(), "error");
+                return Err(reply_error);
+            }
+            log_connect_timing(timing_agent, socks_port, &target_addr, data_conn_ms, greeting_rtt_ms, connect_reply_ms, started.elapsed().as_millis(), result);
             Err(e)
         }
+    }
+}
+
+fn log_connect_timing(
+    agent: Option<&str>,
+    port: u16,
+    target: &str,
+    data_conn_ms: u128,
+    greeting_rtt_ms: u128,
+    connect_reply_ms: u128,
+    total_ms: u128,
+    result: &str,
+) {
+    let Some(agent) = agent else { return };
+    info!(target: "timing", "{}", timing_line(agent, port, target, data_conn_ms, greeting_rtt_ms, connect_reply_ms, total_ms, result));
+}
+
+fn timing_line(
+    agent: &str,
+    port: u16,
+    target: &str,
+    data_conn_ms: u128,
+    greeting_rtt_ms: u128,
+    connect_reply_ms: u128,
+    total_ms: u128,
+    result: &str,
+) -> String {
+    let clean = |value: &str| value.replace(['\r', '\n'], "");
+    format!(
+        "timing agent={} port={} target={} data_conn_ms={} greeting_rtt_ms={} connect_reply_ms={} total_ms={} result={}",
+        clean(agent), port, clean(target), data_conn_ms, greeting_rtt_ms, connect_reply_ms, total_ms, result,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_tunneled_udp_client, timing_line};
+
+    #[test]
+    fn timing_line_keeps_the_parser_contract_on_one_line() {
+        assert_eq!(
+            timing_line("phone\n1", 51314, "example.com:443\r", 200, 50, 75, 330, "timeout"),
+            "timing agent=phone1 port=51314 target=example.com:443 data_conn_ms=200 greeting_rtt_ms=50 connect_reply_ms=75 total_ms=330 result=timeout",
+        );
+    }
+
+    #[test]
+    fn tunneled_udp_only_accepts_the_tcp_client_ip() {
+        let client_ip = "192.0.2.10".parse().unwrap();
+        assert!(is_tunneled_udp_client(client_ip, "192.0.2.10:60000".parse().unwrap()));
+        assert!(!is_tunneled_udp_client(client_ip, "192.0.2.11:60000".parse().unwrap()));
     }
 }
 
@@ -329,7 +414,7 @@ async fn handle_udp_associate_request(
     
     // We need the client's actual IP to distinguish traffic.
     let client_peer_addr = stream.peer_addr()?; 
-    let _client_ip = client_peer_addr.ip();
+    let client_ip = client_peer_addr.ip();
     
     if let Some(signal_tx) = signal_tx {
         let socket = bind_public_udp_socket().await?;
@@ -364,19 +449,7 @@ async fn handle_udp_associate_request(
                 loop {
                     match socket.recv_from(&mut buf).await {
                         Ok((len, src)) => {
-                            let is_client = if let Some(c) = client_udp_addr {
-                                src == c
-                            } else if let Some(a) = agent_addr {
-                                src != a
-                            } else {
-                                if len >= 12 && &buf[0..12] == b"GROWBOT_HOLE" {
-                                    false
-                                } else {
-                                    true
-                                }
-                            };
-
-                            if is_client {
+                            if is_tunneled_udp_client(client_ip, src) {
                                 if client_udp_addr.is_none() || client_udp_addr != Some(src) {
                                     info!(target: &log_target, "Client UDP detected/changed: {}", src);
                                     client_udp_addr = Some(src);
@@ -394,18 +467,14 @@ async fn handle_udp_associate_request(
                                          warn!(target: &log_target, "UDP fwd to agent failed: {}", e);
                                      }
                                  }
-                            } else {
+                            } else if len == 12 && &buf[0..12] == b"GROWBOT_HOLE" {
                                 if agent_addr.is_none() || agent_addr != Some(src) {
                                     info!(target: &log_target, "Agent UDP detected/changed: {}", src);
                                     agent_addr = Some(src);
                                 }
-                                
-                                let payload = &buf[0..len];
-                                if payload.len() == 12 && &payload[0..12] == b"GROWBOT_HOLE" {
                                     info!(target: &log_target, "Agent Hole-Punch Magic received from {}", src);
-                                    continue;
-                                }
-                                
+                            } else if agent_addr == Some(src) {
+                                let payload = &buf[0..len];
                                 // Forward to Client
                                 if let Some(client) = client_udp_addr {
                                       agent_usage.fetch_add(len as u64, Ordering::Relaxed);
@@ -418,6 +487,8 @@ async fn handle_udp_associate_request(
                                           warn!(target: &log_target, "UDP fwd to client failed: {}", e);
                                       }
                                  }
+                            } else {
+                                warn!(target: &log_target, "Dropped UDP packet from non-client host {}", src.ip());
                             }
                         }
                         Err(e) => {

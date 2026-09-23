@@ -15,11 +15,16 @@ lazy_static::lazy_static! {
 
 /// Creates a session and returns its token. Fails if the OS RNG is unavailable (never falls back to a guessable token).
 pub fn create() -> std::io::Result<String> {
-    let mut bytes = [0u8; 32];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    let token: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+    let token = random_token()?;
     insert(token.clone(), Instant::now() + TTL);
     Ok(token)
+}
+
+/// Returns a random 256-bit token without storing it as a dashboard session.
+pub fn random_token() -> std::io::Result<String> {
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{:02x}", b)).collect())
 }
 
 fn insert(token: String, expires_at: Instant) {
