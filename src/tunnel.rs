@@ -17,6 +17,12 @@ const CMD_UDP_SESSION: u8 = 0x03;
 const CMD_RESET_IP: u8 = 0x04;
 const CMD_IP_RESET_SUCCESS: u8 = 0x05;
 const CMD_PING: u8 = 0x06;
+pub const SOCKS_PORT_MIN: u16 = 51300;
+pub const SOCKS_PORT_MAX: u16 = 51399;
+
+pub fn is_socks_port(port: u16) -> bool {
+    (SOCKS_PORT_MIN..=SOCKS_PORT_MAX).contains(&port)
+}
 
 lazy_static::lazy_static! {
     static ref DNS_CACHE: DashMap<String, (SocketAddr, std::time::Instant)> = DashMap::new();
@@ -45,6 +51,10 @@ pub struct BindEntry {
 
 pub type BindRegistry = Arc<DashMap<u16, BindEntry>>;
 
+pub struct BoundSocksListener {
+    listener: TcpListener,
+    port: u16,
+}
 
 pub async fn run_server(
     control_port: u16, 
@@ -406,7 +416,10 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
             }
             let payload = serde_json::json!({
                 "agents": agents_arr,
-                "binds": binds_arr
+                "binds": binds_arr,
+                "socks_host": std::env::var("RUST_PROXY_SOCKS_HOST").unwrap_or_default(),
+                "socks_port_min": SOCKS_PORT_MIN,
+                "socks_port_max": SOCKS_PORT_MAX
             });
             let body = payload.to_string();
             let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
@@ -416,11 +429,21 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
 
         if method == "POST" && base_path == "/api/bind" {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(body_str) {
-                if let (Some(id), Some(port)) = (json["agent_id"].as_str(), json["port"].as_u64()) {
-                    let port = port as u16;
+                if let (Some(id), Some(port)) = (
+                    json["agent_id"].as_str(),
+                    json["port"].as_u64().and_then(|port| u16::try_from(port).ok()),
+                ) {
                     let socks_user = json["user"].as_str().filter(|s| !s.is_empty()).map(String::from);
                     let socks_pass = json["pass"].as_str().filter(|s| !s.is_empty()).map(String::from);
 
+                    if !is_socks_port(port) {
+                        let resp = format!(
+                            "HTTP/1.1 422 Unprocessable Content\r\nContent-Type: application/json\r\n\r\n{{\"error\":\"Port must be between {} and {}\"}}",
+                            SOCKS_PORT_MIN, SOCKS_PORT_MAX
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        return;
+                    }
                     if !registry.contains_key(id) {
                         let resp = "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n\r\n{\"error\":\"Agent not found\"}";
                         let _ = stream.write_all(resp.as_bytes()).await;
@@ -432,6 +455,17 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
                         return;
                     }
 
+                    let socks_listener = match bind_socks_listener(port).await {
+                        Ok(listener) => listener,
+                        Err(e) => {
+                            let resp = format!(
+                                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\n\r\n{{\"error\":\"Port unavailable: {}\"}}",
+                                e
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                            return;
+                        }
+                    };
                     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
                     let usage = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
@@ -449,7 +483,7 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
                     let id_clone = id.to_string();
                     
                     tokio::spawn(async move {
-                        if let Err(e) = crate::tunnel::run_socks_listener(port, id_clone, reg, b_reg, socks_user, socks_pass, shutdown_rx).await {
+                        if let Err(e) = crate::tunnel::run_socks_listener(socks_listener, id_clone, reg, b_reg, socks_user, socks_pass, shutdown_rx).await {
                             log::error!("SOCKS Listener Error on port {}: {}", port, e);
                         }
                     });
@@ -545,8 +579,22 @@ async fn handle_data_connection(mut stream: TcpStream, addr: SocketAddr, registr
     }
 }
 
+pub async fn bind_socks_listener(socks_port: u16) -> Result<BoundSocksListener> {
+    if !is_socks_port(socks_port) {
+        anyhow::bail!(
+            "port must be between {} and {}",
+            SOCKS_PORT_MIN,
+            SOCKS_PORT_MAX
+        );
+    }
+    Ok(BoundSocksListener {
+        listener: TcpListener::bind(format!("0.0.0.0:{}", socks_port)).await?,
+        port: socks_port,
+    })
+}
+
 pub async fn run_socks_listener(
-    socks_port: u16, 
+    bound_listener: BoundSocksListener,
     agent_id: String, 
     registry: AgentRegistry, 
     bind_registry: BindRegistry,
@@ -554,8 +602,10 @@ pub async fn run_socks_listener(
     socks_pass: Option<String>,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<()> {
-    let socks_bind = format!("0.0.0.0:{}", socks_port);
-    let socks_listener = TcpListener::bind(&socks_bind).await?;
+    let BoundSocksListener {
+        listener: socks_listener,
+        port: socks_port,
+    } = bound_listener;
     let bind_usage = if let Some(bind) = bind_registry.get(&socks_port) {
         Arc::clone(&bind.usage)
     } else {
@@ -891,5 +941,18 @@ async fn handle_agent_udp_session(server_addr_str: String, server_udp_port: u16)
                 log::warn!(target: "bind_telemetry", "UDP Back-fwd to server failed: {}", e);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socks_port_range_is_inclusive() {
+        assert!(!is_socks_port(SOCKS_PORT_MIN - 1));
+        assert!(is_socks_port(SOCKS_PORT_MIN));
+        assert!(is_socks_port(SOCKS_PORT_MAX));
+        assert!(!is_socks_port(SOCKS_PORT_MAX + 1));
     }
 }

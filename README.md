@@ -40,6 +40,26 @@ http://<YOUR_VPS_IP>:8081/
 ```
 Enter the password you started the server with to gain access.
 
+## Production network layout
+
+Keep the dashboard and raw TCP traffic on different hostnames:
+
+| Purpose | Hostname | Cloudflare | Public port | Container port |
+| --- | --- | --- | --- | --- |
+| Dashboard | `proxy.example.com` | Proxied | `443` | `8081` |
+| Agent control | `agent.example.com` | DNS only | `18080` | `8080` |
+| SOCKS proxies | `socks.example.com` | DNS only | `51300-51399` | `51300-51399` |
+
+For Coolify, set the dashboard Domain to `https://proxy.example.com:8081`, port mappings to `18080:8080,51300-51399:51300-51399,51300-51399:51300-51399/udp`, and set:
+
+```text
+RUST_PROXY_PUBLIC_HOST=agent.example.com
+RUST_PROXY_PUBLIC_PORT=18080
+RUST_PROXY_SOCKS_HOST=socks.example.com
+```
+
+The dashboard only creates TCP SOCKS binds in that published range; UDP ASSOCIATE uses the same published UDP range. Create `proxy` as a proxied DNS record, `agent` and `socks` as DNS-only records, and restrict the server's port 443 ingress to Cloudflare IP ranges. Do not publish container port 8081 or place agent/SOCKS TCP/UDP traffic behind Cloudflare's standard HTTP proxy.
+
 ---
 
 ## Android Client Quick Start

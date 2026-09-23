@@ -6,6 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use crate::udp::handle_udp_associate;
+use crate::tunnel::{SOCKS_PORT_MAX, SOCKS_PORT_MIN};
 use crate::tunnel_common::{TunnelCmd, TunnelSignalTx, AgentRequestRegistry};
 use crate::security;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -14,6 +15,7 @@ use tokio::time::{timeout, Duration};
 lazy_static::lazy_static! {
     static ref NEXT_REQUEST_ID: AtomicU32 = AtomicU32::new(1);
 }
+static NEXT_UDP_PORT: AtomicU32 = AtomicU32::new(0);
 
 const SOCKS_VERSION: u8 = 0x05;
 const CMD_CONNECT: u8 = 0x01;
@@ -327,18 +329,11 @@ async fn handle_udp_associate_request(
     let _client_ip = client_peer_addr.ip();
     
     if let Some(signal_tx) = signal_tx {
-        let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None)?;
-        let _ = socket.set_nonblocking(true);
-        // Removed 2MB buffers to prevent Buffer Bloat for games like Growtopia
-        
-        let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-        
-        socket.bind(&bind_addr.into())?;
-        let std_socket: std::net::UdpSocket = socket.into();
-        let socket = UdpSocket::from_std(std_socket)?;
+        let socket = bind_public_udp_socket().await?;
         
         let local_addr = socket.local_addr()?;
         let port = local_addr.port();
+        let public_addr = public_udp_addr(stream, port).await?;
         
         info!("Bound Public UDP for Tunnel Session at {}", local_addr);
         
@@ -349,10 +344,7 @@ async fn handle_udp_associate_request(
         }
         
         // 3. Reply to Client
-        let server_ip = stream.local_addr()?.ip();
-        let bind_addr = SocketAddr::new(server_ip, port);
-        
-        write_reply(stream, 0x00, &bind_addr).await?;
+        write_reply(stream, 0x00, &public_addr).await?;
         
         let socket = std::sync::Arc::new(socket);
         let mut agent_addr: Option<SocketAddr> = None;
@@ -444,10 +436,9 @@ async fn handle_udp_associate_request(
 }
 
 async fn handle_udp_associate_local(stream: &mut TcpStream) -> Result<()> {
-    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    let socket = bind_public_udp_socket().await?;
     let udp_local_addr = socket.local_addr()?;
-    let tcp_local_addr = stream.local_addr()?;
-    let bind_addr = SocketAddr::new(tcp_local_addr.ip(), udp_local_addr.port());
+    let bind_addr = public_udp_addr(stream, udp_local_addr.port()).await?;
     
     info!("UDP bound to {}, telling client {}", udp_local_addr, bind_addr);
     write_reply(stream, 0x00, &bind_addr).await?;
@@ -462,6 +453,31 @@ async fn handle_udp_associate_local(stream: &mut TcpStream) -> Result<()> {
     loop { match stream.read(&mut buf).await { Ok(0)|Err(_) => break, _=>{} } }
     udp_task.abort();
     Ok(())
+}
+
+async fn bind_public_udp_socket() -> Result<UdpSocket> {
+    let port_count = u32::from(SOCKS_PORT_MAX - SOCKS_PORT_MIN + 1);
+    for _ in 0..port_count {
+        let port = SOCKS_PORT_MIN + (NEXT_UDP_PORT.fetch_add(1, Ordering::Relaxed) % port_count) as u16;
+        match UdpSocket::bind(("0.0.0.0", port)).await {
+            Ok(socket) => return Ok(socket),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(anyhow!("No UDP ports available in {}-{}", SOCKS_PORT_MIN, SOCKS_PORT_MAX))
+}
+
+async fn public_udp_addr(stream: &TcpStream, port: u16) -> Result<SocketAddr> {
+    let ip = match std::env::var("RUST_PROXY_SOCKS_HOST") {
+        Ok(host) if !host.is_empty() => tokio::net::lookup_host((host.as_str(), port))
+            .await?
+            .find(|addr| addr.is_ipv4())
+            .map(|addr| addr.ip())
+            .ok_or_else(|| anyhow!("RUST_PROXY_SOCKS_HOST has no IPv4 address"))?,
+        _ => stream.local_addr()?.ip(),
+    };
+    Ok(SocketAddr::new(ip, port))
 }
 
 

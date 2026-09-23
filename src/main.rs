@@ -92,8 +92,24 @@ async fn run_server_with_cli(control_port: u16, api_port: u16, password: Option<
     let cumulative_usage = Arc::new(dashmap::DashMap::new());
 
     for b in initial_cache.binds {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let port = b.port;
+        if !tunnel::is_socks_port(port) {
+            warn!(
+                "Skipping cached SOCKS bind on port {}: allowed range is {}-{}",
+                port,
+                tunnel::SOCKS_PORT_MIN,
+                tunnel::SOCKS_PORT_MAX
+            );
+            continue;
+        }
+        let socks_listener = match tunnel::bind_socks_listener(port).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                warn!("Skipping cached SOCKS bind on port {}: {}", port, e);
+                continue;
+            }
+        };
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let id = b.agent_id.clone();
         let user = b.user.clone();
         let pass = b.pass.clone();
@@ -111,7 +127,7 @@ async fn run_server_with_cli(control_port: u16, api_port: u16, password: Option<
         let reg = Arc::clone(&registry);
         let b_reg = Arc::clone(&bind_registry);
         tokio::spawn(async move {
-            if let Err(e) = tunnel::run_socks_listener(port, id, reg, b_reg, user, pass, shutdown_rx).await {
+            if let Err(e) = tunnel::run_socks_listener(socks_listener, id, reg, b_reg, user, pass, shutdown_rx).await {
                 log::error!("Restored SOCKS Listener failed on {}: {}", port, e);
             }
         });

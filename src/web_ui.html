@@ -374,7 +374,7 @@
                     <div class="flex-between">
                         <div>
                             <h2>SOCKS5 Proxies</h2>
-                            <p class="text-muted">Manage active proxy listener ports.</p>
+                            <p class="text-muted">{{ socksHost ? `${socksHost}:${socksPortMin}-${socksPortMax}` : `Configure SOCKS host; ports ${socksPortMin}-${socksPortMax}` }}</p>
                         </div>
                         <div class="flex-gap">
                             <button class="btn btn-outline" @click="showPasswords = !showPasswords">
@@ -395,7 +395,8 @@
                                 <option value="">Select Target Agent</option>
                                 <option v-for="a in agents" :value="a.id">{{ a.id }}</option>
                             </select>
-                            <input type="number" v-model="newBind.port" placeholder="Port (e.g. 1080)" required>
+                            <input type="number" v-model="newBind.port" :min="socksPortMin" :max="socksPortMax"
+                                :placeholder="`Port (${socksPortMin}-${socksPortMax})`" required>
                             <input type="text" v-model="newBind.user" placeholder="Auth Username">
                             <input type="password" v-model="newBind.pass" placeholder="Auth Password">
                             <div class="flex-gap">
@@ -490,6 +491,9 @@
                 const agents = ref([]);
                 const binds = ref([]);
                 const blacklist = ref([]);
+                const socksHost = ref('');
+                const socksPortMin = ref(51000);
+                const socksPortMax = ref(51999);
 
                 const openBindDialog = ref(false);
                 const newBind = ref({ agent_id: '', port: null, user: '', pass: '' });
@@ -534,6 +538,9 @@
                     const data = await res.json();
                     agents.value = data.agents;
                     binds.value = data.binds;
+                    socksHost.value = data.socks_host || '';
+                    socksPortMin.value = data.socks_port_min;
+                    socksPortMax.value = data.socks_port_max;
                 };
 
                 const fetchBlacklist = async () => {
@@ -566,9 +573,13 @@
 
                 const submitBind = async () => {
                     if (!newBind.value.agent_id || !newBind.value.port) return showToast("Agent and Port required");
+                    const port = Number(newBind.value.port);
+                    if (!Number.isInteger(port) || port < socksPortMin.value || port > socksPortMax.value) {
+                        return showToast(`Port must be between ${socksPortMin.value} and ${socksPortMax.value}`);
+                    }
                     const payload = {
                         agent_id: newBind.value.agent_id,
-                        port: parseInt(newBind.value.port),
+                        port,
                         user: newBind.value.user,
                         pass: newBind.value.pass
                     };
@@ -623,7 +634,7 @@
                 };
 
                 const randomizeBind = () => {
-                    newBind.value.port = Math.floor(Math.random() * (65000 - 10000 + 1)) + 10000;
+                    newBind.value.port = Math.floor(Math.random() * (socksPortMax.value - socksPortMin.value + 1)) + socksPortMin.value;
                     const c = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
                     const rnd = (len) => Array.from({ length: len }, () => c[Math.floor(Math.random() * c.length)]).join('');
                     newBind.value.user = 'user_' + rnd(6);
@@ -633,20 +644,23 @@
                 const showPasswords = ref(false);
 
                 const getProxyString = (bind) => {
-                    const ip = window.location.hostname;
+                    if (!socksHost.value) return '';
                     if (bind.user && bind.pass) {
-                        return `${ip}:${bind.port}:${bind.user}:${bind.pass}`;
+                        return `${socksHost.value}:${bind.port}:${bind.user}:${bind.pass}`;
                     }
-                    return `${ip}:${bind.port}`;
+                    return `${socksHost.value}:${bind.port}`;
                 };
 
                 const copyProxy = (bind) => {
-                    fallbackCopyTextToClipboard(getProxyString(bind));
+                    const proxy = getProxyString(bind);
+                    if (!proxy) return showToast('SOCKS host is not configured');
+                    fallbackCopyTextToClipboard(proxy);
                     showToast(`Proxy ${bind.port} Copied`);
                 };
 
                 const copyAllProxies = () => {
                     if (binds.value.length === 0) return showToast("No proxies to copy");
+                    if (!socksHost.value) return showToast('SOCKS host is not configured');
                     const text = binds.value.map(b => getProxyString(b)).join('\n');
                     fallbackCopyTextToClipboard(text);
                     showToast(`${binds.value.length} Proxies Copied`);
@@ -656,7 +670,7 @@
 
                 return {
                     isAuthenticated, passwordInput, login,
-                    agents, binds, blacklist,
+                    agents, binds, blacklist, socksHost, socksPortMin, socksPortMax,
                     openBindDialog, newBind, submitBind, unbindProxy,
                     newBlacklistIp, addBlacklist, removeBlacklist,
                     copyResetLink, toastMessage, passwordHeader,
