@@ -46,8 +46,11 @@ pub async fn handle_client(
     let _ = stream.set_nodelay(true);
     
     if let Err(e) = handshake(&mut stream, socks_user.as_deref(), socks_pw.as_deref()).await {
-        if let Some(p) = peer {
-            security::report_failure(&p.ip().to_string());
+        // Only wrong credentials count toward the ban; disconnects/protocol errors (scanners, health checks) don't.
+        if e.to_string() == "Invalid SOCKS credentials" {
+            if let Some(p) = peer {
+                security::report_failure(&p.ip().to_string());
+            }
         }
         return Err(e);
     }

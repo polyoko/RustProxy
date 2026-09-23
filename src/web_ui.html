@@ -527,7 +527,7 @@
                         await fetchState();
                         isAuthenticated.value = true;
                         fetchBlacklist();
-                        stateInterval = setInterval(fetchState, 2000);
+                        stateInterval = setInterval(() => { fetchState(); fetchBlacklist(); }, 2000);
                     } catch (e) {
                         showToast('Authentication Failed');
                     }
