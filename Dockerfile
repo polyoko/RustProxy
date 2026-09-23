@@ -1,7 +1,14 @@
 FROM rust:1-slim-bookworm AS build
 WORKDIR /app
-COPY . .
-RUN cargo build --release
+
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src \
+  && printf 'fn main() {}\n' > src/main.rs \
+  && printf '' > src/lib.rs \
+  && cargo build --release --locked
+
+COPY src ./src
+RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
 WORKDIR /app
