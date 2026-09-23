@@ -48,7 +48,7 @@ Keep the dashboard and raw TCP traffic on different hostnames:
 
 | Purpose | Hostname | Cloudflare | Public port | Container port |
 | --- | --- | --- | --- | --- |
-| Dashboard | SSH tunnel or TLS reverse proxy | N/A | private | `127.0.0.1:8081` |
+| Dashboard | `proxy.example.com` (Coolify FQDN) | Proxied OK | via Coolify proxy | `8081` |
 | Agent control | `agent.example.com` | DNS only | `18080` | `8080` |
 | SOCKS proxies | `socks.example.com` | DNS only | `51300-51399` | `51300-51399` |
 
@@ -59,6 +59,10 @@ RUST_PROXY_PUBLIC_HOST=agent.example.com
 RUST_PROXY_PUBLIC_PORT=18080
 RUST_PROXY_SOCKS_HOST=socks.example.com
 ```
+
+Add a Coolify persistent volume mounted at `/app`. The server keeps `server_cache.json` (binds), `blacklist.json` and `server_tls_identity.json` (the certificate v2 agents pin) in its working directory; without the volume every redeploy deletes all binds and changes the TLS identity.
+
+Dashboard login failures are counted against `CF-Connecting-IP` (or the last `X-Forwarded-For` entry) only when the request arrives from a private address such as Coolify's proxy; direct clients are counted by their socket address.
 
 The dashboard only creates TCP SOCKS binds in that published range; UDP ASSOCIATE uses the same published UDP range. Create `agent` and `socks` as DNS-only records. Do not publish container port 8081 or place agent/SOCKS TCP/UDP traffic behind Cloudflare's standard HTTP proxy.
 
