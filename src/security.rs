@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
-use std::fs::{File, read_to_string};
-use std::io::Write;
-use log::{info, warn, error};
 use lazy_static::lazy_static;
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::fs::{read_to_string, File};
+use std::io::Write;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_FAILED_ATTEMPTS: u32 = 10;
@@ -28,7 +28,10 @@ struct BlacklistRecord {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 impl SecurityManager {
@@ -48,7 +51,8 @@ impl SecurityManager {
                 for record in records {
                     if record.expires_at > now_secs() {
                         self.blacklist.insert(record.ip.clone());
-                        self.blacklist_expires_at.insert(record.ip, record.expires_at);
+                        self.blacklist_expires_at
+                            .insert(record.ip, record.expires_at);
                     }
                 }
             } else if let Ok(ips) = serde_json::from_str::<Vec<String>>(&content) {
@@ -59,7 +63,11 @@ impl SecurityManager {
             } else {
                 warn!("Failed to parse {}", BLACKLIST_FILE);
             }
-            info!("Loaded {} active blacklisted IPs from {}", self.blacklist.len(), BLACKLIST_FILE);
+            info!(
+                "Loaded {} active blacklisted IPs from {}",
+                self.blacklist.len(),
+                BLACKLIST_FILE
+            );
         } else {
             // Re-attempt loading from old txt if json is missing
             if let Ok(content) = read_to_string("blacklisted.txt") {
@@ -75,12 +83,18 @@ impl SecurityManager {
     }
 
     fn save_blacklist(&self) {
-        let records: Vec<_> = self.blacklist.iter().filter_map(|ip| {
-            self.blacklist_expires_at.get(ip).map(|expires_at| BlacklistRecord {
-                ip: ip.clone(),
-                expires_at: *expires_at,
+        let records: Vec<_> = self
+            .blacklist
+            .iter()
+            .filter_map(|ip| {
+                self.blacklist_expires_at
+                    .get(ip)
+                    .map(|expires_at| BlacklistRecord {
+                        ip: ip.clone(),
+                        expires_at: *expires_at,
+                    })
             })
-        }).collect();
+            .collect();
         match serde_json::to_string_pretty(&records) {
             Ok(json_str) => {
                 if let Ok(mut file) = File::create(BLACKLIST_FILE) {
@@ -95,13 +109,20 @@ impl SecurityManager {
 
     fn add_ban(&mut self, ip: String) {
         self.blacklist.insert(ip.clone());
-        self.blacklist_expires_at.insert(ip, now_secs() + BAN_TTL_SECS);
+        self.blacklist_expires_at
+            .insert(ip, now_secs() + BAN_TTL_SECS);
     }
 
     fn remove_expired(&mut self) -> bool {
         let now = now_secs();
-        let expired: Vec<_> = self.blacklist.iter()
-            .filter(|ip| self.blacklist_expires_at.get(*ip).map_or(true, |expires_at| *expires_at <= now))
+        let expired: Vec<_> = self
+            .blacklist
+            .iter()
+            .filter(|ip| {
+                self.blacklist_expires_at
+                    .get(*ip)
+                    .is_none_or(|expires_at| *expires_at <= now)
+            })
             .cloned()
             .collect();
         for ip in &expired {
@@ -133,10 +154,16 @@ pub fn report_failure(ip: &str) {
     let count = sm.failed_attempts.entry(ip_str.clone()).or_insert(0);
     *count += 1;
 
-    warn!("Failed attempt from {}. Total attempts: {}/{}", ip_str, *count, MAX_FAILED_ATTEMPTS);
+    warn!(
+        "Failed attempt from {}. Total attempts: {}/{}",
+        ip_str, *count, MAX_FAILED_ATTEMPTS
+    );
 
     if *count >= MAX_FAILED_ATTEMPTS {
-        warn!("IP {} reached max failed attempts. Temporary blacklist applied for {} seconds.", ip_str, BAN_TTL_SECS);
+        warn!(
+            "IP {} reached max failed attempts. Temporary blacklist applied for {} seconds.",
+            ip_str, BAN_TTL_SECS
+        );
         sm.add_ban(ip_str);
         sm.save_blacklist();
     }

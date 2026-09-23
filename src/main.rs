@@ -1,12 +1,13 @@
-use rust_proxy::{tunnel, cache};
-use log::{info, error, warn};
+use log::{error, info, warn};
+use rust_proxy::{cache, tunnel};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use inquire::{Select, Text, CustomType};
 use colored::*;
-use std::sync::Arc;
+use inquire::{CustomType, Select, Text};
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -39,7 +40,10 @@ enum Commands {
 
         #[arg(short, long)]
         password: Option<String>,
-    }
+
+        #[arg(long)]
+        fingerprint: Option<String>,
+    },
 }
 
 fn print_banner() {
@@ -52,7 +56,12 @@ fn print_banner() {
                                           |___/ 
     "#;
     println!("{}", banner.bright_blue().bold());
-    println!("{}", " --- High Performance Reverse SOCKS5 Tunnel --- ".bright_black().italic());
+    println!(
+        "{}",
+        " --- High Performance Reverse SOCKS5 Tunnel --- "
+            .bright_black()
+            .italic()
+    );
     println!();
 }
 
@@ -66,9 +75,13 @@ async fn run_interactive() -> Result<()> {
         let control_port = CustomType::<u16>::new("Control Port:")
             .with_default(8080)
             .prompt()?;
-        
+
         let agent_pw = Text::new("Agent Password (Optional, Enter for none):").prompt()?;
-        let agent_pw = if agent_pw.is_empty() { None } else { Some(agent_pw) };
+        let agent_pw = if agent_pw.is_empty() {
+            None
+        } else {
+            Some(agent_pw)
+        };
         let admin_pw = Text::new("Admin Password:").prompt()?;
         if admin_pw.is_empty() {
             anyhow::bail!("Admin password is required");
@@ -76,17 +89,29 @@ async fn run_interactive() -> Result<()> {
 
         let registry = std::sync::Arc::new(dashmap::DashMap::new());
         let bind_registry = std::sync::Arc::new(dashmap::DashMap::new());
-        run_server_with_cli(control_port, 8081, agent_pw, admin_pw, registry, bind_registry).await
+        run_server_with_cli(
+            control_port,
+            8081,
+            agent_pw,
+            admin_pw,
+            registry,
+            bind_registry,
+        )
+        .await
     } else {
         let agent_id = Text::new("Agent ID (e.g., Phone-1):").prompt()?;
         let server_ip = Text::new("Server IP/Host:").prompt()?;
         let control_port = CustomType::<u16>::new("Server Control Port:")
             .with_default(8080)
             .prompt()?;
-        
+
         let server_pw = Text::new("Server Password (if required):").prompt()?;
-        let s_pw = if server_pw.is_empty() { None } else { Some(server_pw) };
-        
+        let s_pw = if server_pw.is_empty() {
+            None
+        } else {
+            Some(server_pw)
+        };
+
         let connect_addr = format!("{}:{}", server_ip, control_port);
         tunnel::run_agent(connect_addr, agent_id, s_pw, None).await
     }
@@ -102,8 +127,12 @@ async fn run_server_with_cli(
 ) -> Result<()> {
     let cache_mgr = Arc::new(cache::CacheManager::new("server_cache.json"));
     let initial_cache = cache_mgr.load().unwrap_or_default();
-    
+
     let cumulative_usage = Arc::new(dashmap::DashMap::new());
+
+    for agent in &initial_cache.agent_usage {
+        cumulative_usage.insert(agent.agent_id.clone(), agent.cumulative_usage);
+    }
 
     for b in initial_cache.binds {
         let (Some(user), Some(pass)) = (b.user.clone(), b.pass.clone()) else {
@@ -130,23 +159,38 @@ async fn run_server_with_cli(
                 continue;
             }
         };
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let id = b.agent_id.clone();
-        
+
         let bind_usage = Arc::new(std::sync::atomic::AtomicU64::new(b.usage));
-        bind_registry.insert(port, tunnel::BindEntry {
-            agent_id: id.clone(),
+        bind_registry.insert(
             port,
-            usage: bind_usage,
-            user: Some(user.clone()),
-            pass: Some(pass.clone()),
-            shutdown_tx: Some(shutdown_tx),
-        });
+            tunnel::BindEntry {
+                agent_id: id.clone(),
+                port,
+                usage: bind_usage,
+                max_conns: b.max_conns,
+                connection_limit: Arc::new(tokio::sync::Semaphore::new(b.max_conns)),
+                user: Some(user.clone()),
+                pass: Some(pass.clone()),
+                shutdown_tx: Some(shutdown_tx),
+            },
+        );
 
         let reg = Arc::clone(&registry);
         let b_reg = Arc::clone(&bind_registry);
         tokio::spawn(async move {
-            if let Err(e) = tunnel::run_socks_listener(socks_listener, id, reg, b_reg, Some(user), Some(pass), shutdown_rx).await {
+            if let Err(e) = tunnel::run_socks_listener(
+                socks_listener,
+                id,
+                reg,
+                b_reg,
+                Some(user),
+                Some(pass),
+                shutdown_rx,
+            )
+            .await
+            {
                 log::error!("Restored SOCKS Listener failed on {}: {}", port, e);
             }
         });
@@ -156,71 +200,149 @@ async fn run_server_with_cli(
     let bind_registry_for_server = Arc::clone(&bind_registry);
     let usage_for_server = Arc::clone(&cumulative_usage);
     tokio::spawn(async move {
-        if let Err(e) = tunnel::run_server(control_port, api_port, agent_password, admin_password, registry_for_server, bind_registry_for_server, usage_for_server).await {
+        if let Err(e) = tunnel::run_server(
+            control_port,
+            api_port,
+            agent_password,
+            admin_password,
+            registry_for_server,
+            bind_registry_for_server,
+            usage_for_server,
+        )
+        .await
+        {
             log::error!("Background Server Failed: {}", e);
         }
     });
 
+    let registry_for_save = Arc::clone(&registry);
     let bind_registry_for_save = Arc::clone(&bind_registry);
+    let usage_for_save = Arc::clone(&cumulative_usage);
     let cache_mgr_for_save = Arc::clone(&cache_mgr);
+    let (cache_stop_tx, mut cache_stop_rx) = tokio::sync::oneshot::channel();
 
-    tokio::spawn(async move {
+    let cache_sync = tokio::spawn(async move {
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-            
-            let mut cache_data = cache::ServerCache::default();
-            for entry in bind_registry_for_save.iter() {
-                let b = entry.value();
-                cache_data.binds.push(cache::BindConfig {
-                    port: entry.key().clone(),
-                    agent_id: b.agent_id.clone(),
-                    user: b.user.clone(),
-                    pass: b.pass.clone(), 
-                    usage: b.usage.load(Ordering::Relaxed),
-                });
-            }
-
-            if let Err(e) = cache_mgr_for_save.save(&cache_data) {
-                log::error!("Failed to save cache: {}", e);
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
+                    if let Err(e) = save_server_cache(&cache_mgr_for_save, &registry_for_save, &bind_registry_for_save, &usage_for_save) {
+                        log::error!("Failed to save cache: {}", e);
+                    }
+                }
+                _ = &mut cache_stop_rx => break,
             }
         }
     });
 
     info!("Web GUI Dashboard active on http://127.0.0.1:{}", api_port);
     info!("Server running in background. Press Ctrl+C to exit.");
-    if let Err(e) = tokio::signal::ctrl_c().await {
-        error!("Failed to listen for ctrl+c: {}", e);
+    if let Err(e) = wait_for_shutdown_signal().await {
+        error!("Failed to listen for shutdown signal: {}", e);
     }
     info!("Shutting down...");
-    
+    let _ = cache_stop_tx.send(());
+    let _ = cache_sync.await;
+    if let Err(e) = save_server_cache(&cache_mgr, &registry, &bind_registry, &cumulative_usage) {
+        error!("Failed to save cache during shutdown: {}", e);
+    }
+
+    Ok(())
+}
+
+fn save_server_cache(
+    cache_mgr: &cache::CacheManager,
+    registry: &tunnel::AgentRegistry,
+    bind_registry: &tunnel::BindRegistry,
+    cumulative_usage: &Arc<dashmap::DashMap<String, u64>>,
+) -> Result<()> {
+    let mut cache_data = cache::ServerCache::default();
+    for entry in bind_registry.iter() {
+        let b = entry.value();
+        cache_data.binds.push(cache::BindConfig {
+            port: *entry.key(),
+            agent_id: b.agent_id.clone(),
+            user: b.user.clone(),
+            pass: b.pass.clone(),
+            usage: b.usage.load(Ordering::Relaxed),
+            max_conns: b.max_conns,
+        });
+    }
+
+    let mut agent_usage = BTreeMap::new();
+    for entry in cumulative_usage.iter() {
+        agent_usage.insert(entry.key().clone(), *entry.value());
+    }
+    for entry in registry.iter() {
+        agent_usage
+            .entry(entry.key().clone())
+            .and_modify(|usage| *usage = (*usage).max(entry.value().usage.load(Ordering::Relaxed)))
+            .or_insert_with(|| entry.value().usage.load(Ordering::Relaxed));
+    }
+    cache_data.agent_usage = agent_usage
+        .into_iter()
+        .map(|(agent_id, cumulative_usage)| cache::AgentCache {
+            agent_id,
+            cumulative_usage,
+        })
+        .collect();
+    cache_mgr.save(&cache_data)
+}
+
+async fn wait_for_shutdown_signal() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result?,
+            _ = terminate.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await?;
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    
+
     let cli = Cli::parse();
-    
+
     match cli.command {
-        Some(Commands::Server { control, api_port, password, admin_password }) => {
+        Some(Commands::Server {
+            control,
+            api_port,
+            password,
+            admin_password,
+        }) => {
             print_banner();
             info!("Running in SERVER mode");
             let registry = std::sync::Arc::new(dashmap::DashMap::new());
             let bind_registry = std::sync::Arc::new(dashmap::DashMap::new());
-            run_server_with_cli(control, api_port, password, admin_password, registry, bind_registry).await?;
+            run_server_with_cli(
+                control,
+                api_port,
+                password,
+                admin_password,
+                registry,
+                bind_registry,
+            )
+            .await?;
         }
-        Some(Commands::Agent { connect, id, password }) => {
+        Some(Commands::Agent {
+            connect,
+            id,
+            password,
+            fingerprint,
+        }) => {
             print_banner();
             info!("Running in AGENT mode ('{}')", id);
-            loop {
-                let res = tunnel::run_agent(connect.clone(), id.clone(), password.clone(), None).await;
-                if let Err(e) = res {
-                    error!("Agent error: {}. Retrying in 5 seconds...", e);
-                } else {
-                    warn!("Agent connection closed. Retrying in 5 seconds...");
-                }
-                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            if let Some(fingerprint) = fingerprint {
+                tunnel::run_agent_with_fingerprint(connect, id, password, fingerprint, None)
+                    .await?;
+            } else {
+                tunnel::run_agent(connect, id, password, None).await?;
             }
         }
         None => {

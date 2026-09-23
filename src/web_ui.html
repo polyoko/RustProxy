@@ -347,6 +347,7 @@
                                     <th>Agent ID</th>
                                     <th>IP Address</th>
                                     <th>OS</th>
+                                    <th>Device health</th>
                                     <th>Bandwidth</th>
                                     <th style="text-align: right;">Actions</th>
                                 </tr>
@@ -355,7 +356,17 @@
                                 <tr v-for="agent in agents" :key="agent.id">
                                     <td style="font-weight: 500;">{{ agent.id }}</td>
                                     <td style="color: hsl(var(--muted-foreground));">{{ agent.addr.split(':')[0] }}</td>
-                                    <td><span class="badge">{{ agent.os }}</span></td>
+                                    <td><span class="badge">{{ agent.os }}</span> <span class="badge">v{{ agent.proto_version || 1 }}</span> <span v-if="agent.status === 'resetting'" class="badge">resetting</span> <span v-if="agent.shared_ip" class="badge">Shared IP</span></td>
+                                    <td :style="deviceStale(agent) ? 'opacity: 0.5' : ''">
+                                        <span v-if="(agent.proto_version || 1) < 2" style="color: hsl(var(--muted-foreground));">ไม่รองรับ</span>
+                                        <span v-else-if="!agent.device" style="color: hsl(var(--muted-foreground));">—</span>
+                                        <template v-else>
+                                            <div>{{ agent.device.carrier }} · {{ agent.device.net }} · {{ agent.device.signal }}/4</div>
+                                            <div style="color: hsl(var(--muted-foreground));">{{ agent.device.battery }}% · {{ agent.device.temp_c }}°C · {{ agent.device.app }} · {{ deviceAge(agent) }}s ago</div>
+                                            <span v-for="warning in deviceWarnings(agent)" :key="warning" class="badge" style="margin-top: 0.25rem; background-color: hsl(var(--destructive));">{{ warning }}</span>
+                                            <span v-if="deviceStale(agent)" class="badge" style="margin-top: 0.25rem;">stale</span>
+                                        </template>
+                                    </td>
                                     <td>{{ agent.usage_mb }} MB</td>
                                     <td style="text-align: right;">
                                         <button v-if="agent.os === 'Android'" @click="copyResetLink(agent)"
@@ -363,7 +374,7 @@
                                     </td>
                                 </tr>
                                 <tr v-if="agents.length === 0">
-                                    <td colspan="5"
+                                    <td colspan="6"
                                         style="text-align: center; color: hsl(var(--muted-foreground)); padding: 2rem;">
                                         No agents currently connected.</td>
                                 </tr>
@@ -396,6 +407,8 @@
                             </select>
                             <input type="number" v-model="newBind.port" :min="socksPortMin" :max="socksPortMax"
                                 :placeholder="`Port (${socksPortMin}-${socksPortMax})`" required>
+                            <input type="number" v-model="newBind.max_conns" min="1" max="65535"
+                                placeholder="Max connections" required>
                             <input type="text" v-model="newBind.user" placeholder="Auth Username" required>
                             <input type="password" v-model="newBind.pass" placeholder="Auth Password" required>
                             <div class="flex-gap">
@@ -413,6 +426,7 @@
                                     <th>Port</th>
                                     <th>Target</th>
                                     <th>Username</th>
+                                    <th>Connections</th>
                                     <th>Bandwidth</th>
                                     <th style="text-align: right;">Actions</th>
                                 </tr>
@@ -424,6 +438,7 @@
                                     <td>
                                         <span style="font-family: monospace;">{{ bind.user }}</span>
                                     </td>
+                                    <td>{{ bind.active_conns }} / {{ bind.max_conns }}</td>
                                     <td>{{ bind.usage_mb }} MB</td>
                                     <td style="text-align: right;">
                                         <div class="flex-gap" style="justify-content: flex-end;">
@@ -433,7 +448,7 @@
                                     </td>
                                 </tr>
                                 <tr v-if="binds.length === 0">
-                                    <td colspan="5"
+                                    <td colspan="6"
                                         style="text-align: center; color: hsl(var(--muted-foreground)); padding: 2rem;">
                                         No active proxy ports.</td>
                                 </tr>
@@ -488,7 +503,7 @@
                 const socksPortMax = ref(51999);
 
                 const openBindDialog = ref(false);
-                const newBind = ref({ agent_id: '', port: null, user: '', pass: '' });
+                const newBind = ref({ agent_id: '', port: null, max_conns: 10, user: '', pass: '' });
 
                 const newBlacklistIp = ref('');
                 const toastMessage = ref('');
@@ -497,6 +512,20 @@
                 const showToast = (msg) => {
                     toastMessage.value = msg;
                     setTimeout(() => toastMessage.value = '', 3000);
+                };
+
+                const deviceStale = (agent) => !!agent.device && Date.now() / 1000 - agent.device.received_at > 180;
+                const deviceAge = (agent) => Math.max(0, Math.floor(Date.now() / 1000 - agent.device.received_at));
+                const deviceWarnings = (agent) => {
+                    const device = agent.device;
+                    if (!device) return [];
+                    return [
+                        device.temp_c > 45 && 'hot',
+                        device.health !== 'good' && `battery ${device.health}`,
+                        device.signal <= 1 && 'weak signal',
+                        device.transport !== 'cellular' && 'not cellular',
+                        !device.assistant && 'Assistant off',
+                    ].filter(Boolean);
                 };
 
                 // Auth rides on the HttpOnly session cookie set by /api/login (same-origin fetch sends it).
@@ -584,9 +613,14 @@
                     if (!Number.isInteger(port) || port < socksPortMin.value || port > socksPortMax.value) {
                         return showToast(`Port must be between ${socksPortMin.value} and ${socksPortMax.value}`);
                     }
+                    const maxConns = Number(newBind.value.max_conns);
+                    if (!Number.isInteger(maxConns) || maxConns < 1 || maxConns > 65535) {
+                        return showToast("Max connections must be between 1 and 65535");
+                    }
                     const payload = {
                         agent_id: newBind.value.agent_id,
                         port,
+                        max_conns: maxConns,
                         user: newBind.value.user,
                         pass: newBind.value.pass
                     };
@@ -601,7 +635,7 @@
                         }
                         showToast(`Proxy bound to ${payload.port}; credentials copied`);
                         openBindDialog.value = false;
-                        newBind.value = { agent_id: '', port: null, user: '', pass: '' };
+                        newBind.value = { agent_id: '', port: null, max_conns: 10, user: '', pass: '' };
                         fetchState();
                     } else {
                         const data = await res.json();
@@ -669,7 +703,7 @@
                     agents, binds, blacklist, socksHost, socksPortMin, socksPortMax,
                     openBindDialog, newBind, submitBind, unbindProxy,
                     newBlacklistIp, addBlacklist, removeBlacklist,
-                    copyResetLink, toastMessage, randomizeBind
+                    copyResetLink, toastMessage, randomizeBind, deviceStale, deviceAge, deviceWarnings
                 };
             }
         }).mount('#app');

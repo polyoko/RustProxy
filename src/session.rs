@@ -33,9 +33,14 @@ fn insert(token: String, expires_at: Instant) {
         SESSIONS.retain(|_, exp| *exp > now);
     }
     while SESSIONS.len() >= MAX_SESSIONS {
-        let oldest = SESSIONS.iter().min_by_key(|e| *e.value()).map(|e| e.key().clone());
+        let oldest = SESSIONS
+            .iter()
+            .min_by_key(|e| *e.value())
+            .map(|e| e.key().clone());
         match oldest {
-            Some(k) => { SESSIONS.remove(&k); }
+            Some(k) => {
+                SESSIONS.remove(&k);
+            }
             None => break,
         }
     }
@@ -67,11 +72,21 @@ pub fn token_from_cookie_header(header: &str) -> Option<&str> {
 
 /// `secure` only when the request came over HTTPS: browsers drop `Secure` cookies on plain-HTTP origins (README's `http://<VPS_IP>:8081`).
 pub fn set_cookie_header(token: &str, secure: bool) -> String {
-    format!("Set-Cookie: {}={}; HttpOnly;{} SameSite=Strict; Path=/; Max-Age={}", COOKIE_NAME, token, if secure { " Secure;" } else { "" }, TTL.as_secs())
+    format!(
+        "Set-Cookie: {}={}; HttpOnly;{} SameSite=Strict; Path=/; Max-Age={}",
+        COOKIE_NAME,
+        token,
+        if secure { " Secure;" } else { "" },
+        TTL.as_secs()
+    )
 }
 
 pub fn clear_cookie_header(secure: bool) -> String {
-    format!("Set-Cookie: {}=; HttpOnly;{} SameSite=Strict; Path=/; Max-Age=0", COOKIE_NAME, if secure { " Secure;" } else { "" })
+    format!(
+        "Set-Cookie: {}=; HttpOnly;{} SameSite=Strict; Path=/; Max-Age=0",
+        COOKIE_NAME,
+        if secure { " Secure;" } else { "" }
+    )
 }
 
 /// Constant-time comparison so password checks don't leak how many leading bytes matched.
@@ -111,7 +126,10 @@ mod tests {
 
     #[test]
     fn parses_cookie_header() {
-        assert_eq!(token_from_cookie_header("a=1; rp_session=abc; b=2"), Some("abc"));
+        assert_eq!(
+            token_from_cookie_header("a=1; rp_session=abc; b=2"),
+            Some("abc")
+        );
         assert_eq!(token_from_cookie_header("rp_session="), None);
         assert_eq!(token_from_cookie_header("x_rp_session=abc"), None);
     }

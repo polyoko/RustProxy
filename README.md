@@ -33,6 +33,7 @@ Upload the executable to your public VPS (like Ubuntu or Debian). Use a separate
 - `-a 8081`: Dashboard/API port, bound only to `127.0.0.1`.
 - `-c 8080`: This is the port your Android/PC agents connect to.
 - `-p`: Agent password. `--admin-password`: dashboard and API password.
+- On first start the server creates `server_tls_identity.json`. Back it up with the server data; losing or replacing it makes v2 Android agents reject the server until they scan a newly generated QR code.
 
 ### 3. Open the Dashboard
 Create an SSH tunnel from your workstation:
@@ -79,11 +80,12 @@ You can run the RustProxy agent directly on any PC (Windows, Linux, macOS) to ex
 1. Download the pre-compiled `rust_proxy` executable for your OS from the [Releases page](../../releases).
 2. Run the executable in `agent` mode, pointing it to your public Control Server:
 ```bash
-./rust_proxy agent -s "<YOUR_VPS_IP>:8080" -a "MyDesktopPC" -p "AgentPassword123"
+./rust_proxy agent -c "<YOUR_VPS_IP>:8080" -i "MyDesktopPC" -p "AgentPassword123"
 ```
-- `-s`: The IP and Port of your Control Server (use the `--control-port`, not the api port).
-- `-a`: Your custom Agent ID name to display in the Dashboard.
+- `-c`: The IP and Port of your Control Server (use the `--control-port`, not the api port).
+- `-i`: Your custom Agent ID name to display in the Dashboard.
 - `-p`: The secure server password.
+- Add `--fingerprint <QR fp>` to use the TLS v2 control protocol. Without it, the agent intentionally stays on the v1 compatibility path.
 
 ### Enabling Remote IP Reset (Airplane Mode Toggle)
 
