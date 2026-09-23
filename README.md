@@ -52,7 +52,7 @@ Keep the dashboard and raw TCP traffic on different hostnames:
 | Agent control | `agent.example.com` | DNS only | `18080` | `8080` |
 | SOCKS proxies | `socks.example.com` | DNS only | `51300-51399` | `51300-51399` |
 
-For Coolify, do not publish port 8081. Use a TLS reverse proxy that can reach the container's loopback API, or an SSH tunnel. Publish `18080:8080,51300-51399:51300-51399,51300-51399:51300-51399/udp`, and set:
+For Coolify, point the Dashboard FQDN at container port `8081`; do not add a host port mapping for it. The Docker image permits Coolify's internal proxy to reach that port while the standalone binary remains loopback-only. Publish `18080:8080,51300-51399:51300-51399,51300-51399:51300-51399/udp`, and set:
 
 ```text
 RUST_PROXY_PUBLIC_HOST=agent.example.com

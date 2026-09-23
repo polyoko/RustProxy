@@ -192,6 +192,13 @@ pub struct BoundSocksListener {
     port: u16,
 }
 
+fn api_bind_addr(api_port: u16, public: bool) -> String {
+    format!(
+        "{}:{api_port}",
+        if public { "0.0.0.0" } else { "127.0.0.1" }
+    )
+}
+
 pub async fn run_server(
     control_port: u16,
     api_port: u16,
@@ -211,7 +218,10 @@ pub async fn run_server(
     let listener = TcpListener::bind(&bind_addr).await?;
     info!("Tunnel Listener active on {}", bind_addr);
 
-    let api_bind = format!("127.0.0.1:{}", api_port);
+    let api_bind = api_bind_addr(
+        api_port,
+        std::env::var("RUST_PROXY_API_BIND").as_deref() == Ok("0.0.0.0"),
+    );
     if let Ok(api_listener) = TcpListener::bind(&api_bind).await {
         info!("API Listener active on {}", api_bind);
         let registry_for_api = Arc::clone(&registry);
@@ -2188,6 +2198,12 @@ mod tests {
         assert!(is_socks_port(SOCKS_PORT_MIN));
         assert!(is_socks_port(SOCKS_PORT_MAX));
         assert!(!is_socks_port(SOCKS_PORT_MAX + 1));
+    }
+
+    #[test]
+    fn api_bind_defaults_private_and_allows_the_container_proxy() {
+        assert_eq!(api_bind_addr(8081, false), "127.0.0.1:8081");
+        assert_eq!(api_bind_addr(8081, true), "0.0.0.0:8081");
     }
 
     #[test]
