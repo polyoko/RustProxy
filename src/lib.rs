@@ -4,6 +4,7 @@ pub mod udp;
 pub mod tunnel_common;
 pub mod security;
 pub mod cache;
+pub mod session;
 
 #[cfg(target_os = "android")]
 use jni::objects::{JObject, JString};

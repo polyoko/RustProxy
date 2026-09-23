@@ -274,6 +274,8 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
         // Parse Headers
         let mut host = String::new();
         let mut x_pw = String::new();
+        let mut cookie_header = String::new();
+        let mut is_https = false;
         for line in lines {
             let l_lower = line.to_lowercase();
             if l_lower.starts_with("host:") {
@@ -281,11 +283,18 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
                 if let Some(idx) = host.find(':') { host = host[..idx].to_string(); }
             } else if l_lower.starts_with("x-server-password:") {
                 x_pw = line[18..].trim().to_string();
+            } else if l_lower.starts_with("cookie:") {
+                cookie_header = line[7..].trim().to_string();
+            } else if l_lower.starts_with("x-forwarded-proto:") {
+                is_https = l_lower[18..].trim() == "https";
             }
         }
 
         let expected_pw = server_pw.clone().unwrap_or_default();
-        let mut is_authed = expected_pw.is_empty() || x_pw == expected_pw;
+        let session_token = crate::session::token_from_cookie_header(&cookie_header);
+        let mut is_authed = expected_pw.is_empty()
+            || crate::session::constant_time_eq(&x_pw, &expected_pw)
+            || session_token.map_or(false, crate::session::is_valid);
 
         // Path Validation
         let (base_path, query) = if let Some(idx) = path.find('?') {
@@ -307,6 +316,42 @@ async fn handle_api_connection(mut stream: TcpStream, registry: AgentRegistry, b
         if base_path == "/" || base_path == "/index.html" {
             let html = include_str!("web_ui.html");
             let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", html.len(), html);
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return;
+        }
+
+        if method == "POST" && base_path == "/api/login" {
+            let password = serde_json::from_str::<serde_json::Value>(body_str)
+                .ok()
+                .and_then(|json| json["password"].as_str().map(String::from));
+            let resp = match password {
+                None => "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Bad request\"}".to_string(),
+                Some(pw) if !crate::session::constant_time_eq(&pw, &expected_pw) => {
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Unauthorized\"}".to_string()
+                }
+                Some(_) => match crate::session::create() {
+                    Ok(token) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}\r\nConnection: close\r\n\r\n{{\"ok\":true}}",
+                        crate::session::set_cookie_header(&token, is_https)
+                    ),
+                    Err(e) => {
+                        error!("Failed to create dashboard session: {}", e);
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Internal error\"}".to_string()
+                    }
+                },
+            };
+            let _ = stream.write_all(resp.as_bytes()).await;
+            return;
+        }
+
+        if method == "POST" && base_path == "/api/logout" {
+            if let Some(token) = session_token {
+                crate::session::revoke(token);
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}\r\nConnection: close\r\n\r\n{{\"ok\":true}}",
+                crate::session::clear_cookie_header(is_https)
+            );
             let _ = stream.write_all(resp.as_bytes()).await;
             return;
         }

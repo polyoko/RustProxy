@@ -300,7 +300,7 @@
 
     <div id="app">
         <!-- Login Overlay -->
-        <div class="login-overlay" v-if="!isAuthenticated">
+        <div class="login-overlay" v-if="authChecked && !isAuthenticated">
             <div class="card" style="width: 100%; max-width: 380px;">
                 <h2 style="text-align: center;">Sign In</h2>
                 <p class="text-muted" style="text-align: center;">Enter your server password to continue.</p>
@@ -312,10 +312,11 @@
         </div>
 
         <!-- Main Dashboard -->
-        <div class="main-container" v-else>
+        <div class="main-container" v-else-if="isAuthenticated">
             <div class="flex-between" style="margin-bottom: 2rem;">
                 <h1>Dashboard</h1>
-                <a :href="`/qr?pwd=${passwordHeader}`" target="_blank" style="text-decoration:none;">
+                <div class="flex-gap">
+                <a href="/qr" target="_blank" style="text-decoration:none;">
                     <button class="btn btn-outline flex-gap">
                         <svg width="15" height="15" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg">
                             <path
@@ -325,6 +326,8 @@
                         Mobile QR
                     </button>
                 </a>
+                <button class="btn btn-outline" @click="logout">Logout</button>
+                </div>
             </div>
 
             <div class="grid-layout">
@@ -485,6 +488,7 @@
         createApp({
             setup() {
                 const isAuthenticated = ref(false);
+                const authChecked = ref(false);
                 const passwordInput = ref('');
                 const passwordHeader = ref('');
 
@@ -507,13 +511,11 @@
                     setTimeout(() => toastMessage.value = '', 3000);
                 };
 
+                // Auth rides on the HttpOnly session cookie set by /api/login (same-origin fetch sends it).
                 const apiFetch = async (endpoint, options = {}) => {
-                    options.headers = {
-                        ...options.headers,
-                        'X-Server-Password': passwordHeader.value
-                    };
                     const res = await fetch(endpoint, options);
                     if (res.status === 401) {
+                        if (isAuthenticated.value) showToast('Session expired');
                         isAuthenticated.value = false;
                         clearInterval(stateInterval);
                         throw new Error("Unauthorized");
@@ -521,16 +523,36 @@
                     return res;
                 };
 
+                const startDashboard = () => {
+                    isAuthenticated.value = true;
+                    fetchBlacklist();
+                    clearInterval(stateInterval);
+                    stateInterval = setInterval(() => { fetchState(); fetchBlacklist(); }, 2000);
+                };
+
                 const login = async () => {
-                    passwordHeader.value = passwordInput.value;
                     try {
+                        const res = await fetch('/api/login', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ password: passwordInput.value })
+                        });
+                        if (!res.ok) throw new Error('login failed');
+                        // kept in memory only, for the shareable reset link
+                        passwordHeader.value = passwordInput.value;
+                        passwordInput.value = '';
                         await fetchState();
-                        isAuthenticated.value = true;
-                        fetchBlacklist();
-                        stateInterval = setInterval(() => { fetchState(); fetchBlacklist(); }, 2000);
+                        startDashboard();
                     } catch (e) {
                         showToast('Authentication Failed');
                     }
+                };
+
+                const logout = async () => {
+                    clearInterval(stateInterval);
+                    await fetch('/api/logout', { method: 'POST' }).catch(() => {});
+                    passwordHeader.value = '';
+                    isAuthenticated.value = false;
                 };
 
                 const fetchState = async () => {
@@ -628,6 +650,12 @@
                 };
 
                 const copyResetLink = (agent_id) => {
+                    // ponytail: reset link still embeds the admin password until T2.3 gives per-agent tokens
+                    if (!passwordHeader.value) {
+                        const pw = window.prompt('Enter server password to build the reset link');
+                        if (!pw) return;
+                        passwordHeader.value = pw;
+                    }
                     const link = `${window.location.protocol}//${window.location.host}/${agent_id}?reset_ip&pwd=${passwordHeader.value}`;
                     fallbackCopyTextToClipboard(link);
                     showToast("Link Copied");
@@ -666,10 +694,21 @@
                     showToast(`${binds.value.length} Proxies Copied`);
                 };
 
+                onMounted(async () => {
+                    try {
+                        await fetchState();
+                        startDashboard();
+                    } catch (e) {
+                        // no valid session: show login
+                    } finally {
+                        authChecked.value = true;
+                    }
+                });
+
                 onUnmounted(() => clearInterval(stateInterval));
 
                 return {
-                    isAuthenticated, passwordInput, login,
+                    isAuthenticated, authChecked, passwordInput, login, logout,
                     agents, binds, blacklist, socksHost, socksPortMin, socksPortMax,
                     openBindDialog, newBind, submitBind, unbindProxy,
                     newBlacklistIp, addBlacklist, removeBlacklist,
