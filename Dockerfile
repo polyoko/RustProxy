@@ -8,7 +8,7 @@ RUN mkdir src \
   && cargo build --release --locked
 
 COPY src ./src
-RUN cargo build --release --locked
+RUN touch src/main.rs src/lib.rs && cargo build --release --locked
 
 FROM debian:bookworm-slim
 WORKDIR /app
