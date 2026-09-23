@@ -391,6 +391,7 @@
                             <p class="text-muted">{{ socksHost ? `${socksHost}:${socksPortMin}-${socksPortMax}` : `Configure SOCKS host; ports ${socksPortMin}-${socksPortMax}` }}</p>
                         </div>
                         <div class="flex-gap">
+                            <button class="btn btn-outline" @click="copyAllProxies">Copy All</button>
                             <button class="btn btn-primary" @click="openBindDialog = !openBindDialog">
                                 {{ openBindDialog ? 'Cancel' : 'Create Proxy' }}
                             </button>
@@ -442,6 +443,8 @@
                                     <td>{{ bind.usage_mb }} MB</td>
                                     <td style="text-align: right;">
                                         <div class="flex-gap" style="justify-content: flex-end;">
+                                            <button class="btn btn-secondary btn-sm"
+                                                @click="copyProxy(bind)">Copy</button>
                                             <button class="btn btn-destructive btn-sm"
                                                 @click="unbindProxy(bind.port)">Kill</button>
                                         </div>
@@ -677,6 +680,21 @@
                     showToast("Link Copied");
                 };
 
+                const proxyString = (b) => `${socksHost.value}:${b.port}:${b.user}:${b.pass}`;
+
+                const copyProxy = (bind) => {
+                    if (!socksHost.value) return showToast('SOCKS host is not configured');
+                    fallbackCopyTextToClipboard(proxyString(bind));
+                    showToast(`Proxy ${bind.port} Copied`);
+                };
+
+                const copyAllProxies = () => {
+                    if (binds.value.length === 0) return showToast('No proxies to copy');
+                    if (!socksHost.value) return showToast('SOCKS host is not configured');
+                    fallbackCopyTextToClipboard(binds.value.map(proxyString).join('\n'));
+                    showToast(`${binds.value.length} Proxies Copied`);
+                };
+
                 const randomizeBind = () => {
                     newBind.value.port = Math.floor(Math.random() * (socksPortMax.value - socksPortMin.value + 1)) + socksPortMin.value;
                     const c = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -701,7 +719,7 @@
                 return {
                     isAuthenticated, authChecked, passwordInput, login, logout,
                     agents, binds, blacklist, socksHost, socksPortMin, socksPortMax,
-                    openBindDialog, newBind, submitBind, unbindProxy,
+                    openBindDialog, newBind, submitBind, unbindProxy, copyProxy, copyAllProxies,
                     newBlacklistIp, addBlacklist, removeBlacklist,
                     copyResetLink, toastMessage, randomizeBind, deviceStale, deviceAge, deviceWarnings
                 };

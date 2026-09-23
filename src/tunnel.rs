@@ -591,6 +591,24 @@ where
     Ok(())
 }
 
+/// Real client IP for ban accounting. Forwarding headers are trusted only when the
+/// TCP peer is private/loopback (Coolify's Traefik behind Cloudflare); a direct
+/// internet client cannot spoof them.
+fn api_client_ip(peer: IpAddr, cf_ip: Option<&str>, forwarded_for: Option<&str>) -> String {
+    let trusted = match peer {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback(),
+        IpAddr::V6(v6) => v6.is_loopback(),
+    };
+    let from_header = cf_ip
+        // rightmost entry was appended by our own proxy, so it cannot be forged
+        .or_else(|| forwarded_for.and_then(|v| v.rsplit(',').next()))
+        .and_then(|v| v.trim().parse::<IpAddr>().ok());
+    match from_header {
+        Some(ip) if trusted => ip.to_string(),
+        _ => peer.to_string(),
+    }
+}
+
 async fn handle_api_connection(
     mut stream: TcpStream,
     peer_addr: SocketAddr,
@@ -601,11 +619,6 @@ async fn handle_api_connection(
     control_port: u16,
     tls_fingerprint: String,
 ) {
-    let peer_ip = peer_addr.ip().to_string();
-    if security::is_blacklisted(&peer_ip) {
-        let _ = stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Too many attempts\"}").await;
-        return;
-    }
     let request_str = match read_api_request(&mut stream).await {
         Ok(Some(request)) => request,
         Ok(None) | Err(ApiRequestError::Incomplete) => return,
@@ -635,6 +648,8 @@ async fn handle_api_connection(
     let mut x_pw = String::new();
     let mut cookie_header = String::new();
     let mut is_https = false;
+    let mut cf_ip = None;
+    let mut forwarded_for = None;
     for line in lines {
         let l_lower = line.to_lowercase();
         if l_lower.starts_with("host:") {
@@ -648,7 +663,17 @@ async fn handle_api_connection(
             cookie_header = line[7..].trim().to_string();
         } else if let Some(proto) = l_lower.strip_prefix("x-forwarded-proto:") {
             is_https = proto.trim() == "https";
+        } else if l_lower.starts_with("cf-connecting-ip:") {
+            cf_ip = Some(line[17..].trim().to_string());
+        } else if l_lower.starts_with("x-forwarded-for:") {
+            forwarded_for = Some(line[16..].trim().to_string());
         }
+    }
+
+    let peer_ip = api_client_ip(peer_addr.ip(), cf_ip.as_deref(), forwarded_for.as_deref());
+    if security::is_blacklisted(&peer_ip) {
+        let _ = stream.write_all(b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":\"Too many attempts\"}").await;
+        return;
     }
 
     let expected_pw = admin_password;
@@ -891,6 +916,8 @@ async fn handle_api_connection(
                     "port": entry.key(),
                     "agent_id": bind.agent_id,
                     "user": bind.user.clone().unwrap_or_default(),
+                    // admin-only endpoint; operators need the full proxy string to hand out
+                    "pass": bind.pass.clone().unwrap_or_default(),
                     "usage_mb": format!("{:.2}", usage_mb),
                     "active_conns": bind.max_conns.saturating_sub(bind.connection_limit.available_permits()),
                     "max_conns": bind.max_conns
@@ -2198,6 +2225,17 @@ mod tests {
         assert!(is_socks_port(SOCKS_PORT_MIN));
         assert!(is_socks_port(SOCKS_PORT_MAX));
         assert!(!is_socks_port(SOCKS_PORT_MAX + 1));
+    }
+
+    #[test]
+    fn api_client_ip_trusts_forwarding_headers_only_from_private_peers() {
+        let proxy: IpAddr = "172.18.0.2".parse().unwrap();
+        let public: IpAddr = "203.0.113.9".parse().unwrap();
+        assert_eq!(api_client_ip(proxy, Some("1.2.3.4"), Some("9.9.9.9, 5.6.7.8")), "1.2.3.4");
+        assert_eq!(api_client_ip(proxy, None, Some("9.9.9.9, 5.6.7.8")), "5.6.7.8");
+        assert_eq!(api_client_ip(proxy, Some("garbage"), None), "172.18.0.2");
+        assert_eq!(api_client_ip(proxy, None, None), "172.18.0.2");
+        assert_eq!(api_client_ip(public, Some("1.2.3.4"), Some("5.6.7.8")), "203.0.113.9");
     }
 
     #[test]
