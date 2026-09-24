@@ -32,7 +32,8 @@ const STATUS_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 const STATUS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 pub const SOCKS_PORT_MIN: u16 = 51300;
 pub const SOCKS_PORT_MAX: u16 = 51399;
-pub const DEFAULT_MAX_CONNS: usize = 10;
+// ponytail: one browser opens 20-100 sockets; 256 keeps 2 fds/conn under the 1024 fd limit of older Android.
+pub const DEFAULT_MAX_CONNS: usize = 256;
 pub const MAX_CONNS: usize = 65_535;
 const AGENT_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
 const AGENT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);

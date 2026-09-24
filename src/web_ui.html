@@ -506,7 +506,7 @@
                 const socksPortMax = ref(51999);
 
                 const openBindDialog = ref(false);
-                const newBind = ref({ agent_id: '', port: null, max_conns: 10, user: '', pass: '' });
+                const newBind = ref({ agent_id: '', port: null, max_conns: 256, user: '', pass: '' });
 
                 const newBlacklistIp = ref('');
                 const toastMessage = ref('');
@@ -638,7 +638,7 @@
                         }
                         showToast(`Proxy bound to ${payload.port}; credentials copied`);
                         openBindDialog.value = false;
-                        newBind.value = { agent_id: '', port: null, max_conns: 10, user: '', pass: '' };
+                        newBind.value = { agent_id: '', port: null, max_conns: 256, user: '', pass: '' };
                         fetchState();
                     } else {
                         const data = await res.json();
